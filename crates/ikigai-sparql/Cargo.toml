@@ -1,0 +1,21 @@
+[package]
+name = "ikigai-sparql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "SPARQL query module for ikigai — urn:sparql:{select,ask,describe,construct} run over one or more graph=<uri> sources resolved through the kernel (federation by listing graphs), cacheable via their golden threads. Oxigraph in-memory; runs natively and in the browser (WASM)."
+keywords = ["ikigai", "roc", "sparql", "rdf", "oxigraph"]
+categories = ["web-programming", "database"]
+
+[dependencies]
+ikigai-core = { workspace = true }
+oxigraph = { workspace = true }
+async-trait = "0.1"
+
+# Oxigraph's `js` feature wires getrandom's wasm backend (paired with the
+# getrandom_backend cfg in .cargo/config.toml), so the store/query run in the browser.
+[target.'cfg(target_family = "wasm")'.dependencies]
+oxigraph = { workspace = true, features = ["js"] }

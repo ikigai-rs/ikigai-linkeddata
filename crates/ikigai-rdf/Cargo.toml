@@ -1,0 +1,21 @@
+[package]
+name = "ikigai-rdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "RDF transreption module for ikigai — urn:rdf:* content-negotiates an RDF graph between syntaxes (Turtle, N-Triples, RDF/XML, JSON-LD, …) or renders it as an HTML table. Pure Oxigraph parsers; runs natively and in the browser (WASM)."
+keywords = ["ikigai", "roc", "rdf", "transreption", "oxigraph"]
+categories = ["web-programming", "parser-implementations"]
+
+[dependencies]
+ikigai-core = { workspace = true }
+oxrdfio = { workspace = true }
+oxrdf = { workspace = true }
+
+# oxrdf/oxrdfio depend on getrandom; on wasm its JS backend must be enabled (paired
+# with the `getrandom_backend` cfg in .cargo/config.toml). Not used directly.
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }

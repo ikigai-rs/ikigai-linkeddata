@@ -1,0 +1,4 @@
+# oxrdf/oxrdfio pull getrandom 0.3, whose wasm backend must be selected explicitly.
+# Needed to build any crate here for wasm32 (transrept/SPARQL run in the browser).
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
