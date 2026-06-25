@@ -42,9 +42,14 @@ source urn:httpGet url=https://example.org/thing | urn:rdf:transrept as=text/htm
 Mount it in any kernel — the CLI's embedded space, the in-browser kernel:
 
 ```rust
-let kernel = Kernel::builder()
-    .mount(ikigai_rdf::space())
-    .build();
+use ikigai_core::{Fallback, Kernel, Space};
+use std::sync::Arc;
+
+let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+    Arc::new(my_space) as Arc<dyn Space>,
+    Arc::new(ikigai_rdf::space()) as Arc<dyn Space>,
+]));
+let kernel = Kernel::new(root);
 ```
 
 ## Caching

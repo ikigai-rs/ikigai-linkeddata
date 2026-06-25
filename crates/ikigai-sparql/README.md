@@ -55,9 +55,14 @@ source urn:sparql:construct query="CONSTRUCT { ?s <http://ex/label> ?n } WHERE {
 ```
 
 ```rust
-let kernel = Kernel::builder()
-    .mount(ikigai_sparql::space())
-    .build();
+use ikigai_core::{Fallback, Kernel, Space};
+use std::sync::Arc;
+
+let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
+    Arc::new(my_space) as Arc<dyn Space>,
+    Arc::new(ikigai_sparql::space()) as Arc<dyn Space>,
+]));
+let kernel = Kernel::new(root);
 ```
 
 ## Caching
