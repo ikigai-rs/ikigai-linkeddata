@@ -47,7 +47,33 @@ pub fn space() -> EndpointSpace {
                      application/n-quads, application/trig, application/rdf+xml, \
                      application/ld+json, or text/html",
                 ))
-                .output("text/turtle;charset=utf-8"),
+                .output("text/turtle;charset=utf-8")
+                // First-class `ik:Transreptor`: the media types it converts between. The
+                // input syntax is *sniffed* (see `sniff`), so it accepts opaque
+                // `application/octet-stream` too — the universal "raw, not-yet-typed
+                // bytes" a fetch or file read delivers. `text/html` is output-only (the
+                // human subject/predicate/object table). Drives selection: a single
+                // auto-invocable hop (`content` + `as`) over any of these.
+                .transreptor(
+                    [
+                        "text/turtle",
+                        "application/n-triples",
+                        "application/n-quads",
+                        "application/trig",
+                        "application/rdf+xml",
+                        "application/ld+json",
+                        "application/octet-stream",
+                    ],
+                    [
+                        "text/turtle",
+                        "application/n-triples",
+                        "application/n-quads",
+                        "application/trig",
+                        "application/rdf+xml",
+                        "application/ld+json",
+                        "text/html",
+                    ],
+                ),
         ),
     )
 }
@@ -261,5 +287,27 @@ mod tests {
     fn unknown_target_is_a_clean_error() {
         let err = transrept_bytes(TTL.as_bytes(), "application/x-nonsense").unwrap_err();
         assert!(format!("{err}").contains("unknown target"));
+    }
+
+    #[test]
+    fn describes_itself_as_a_transreptor() {
+        use ikigai_core::{Iri, Request, Resolution, Scope, Space};
+        let request = Request::new(Verb::Meta, Iri::parse("urn:rdf:transrept").unwrap());
+        let Resolution::Hit(resolved) = space().resolve(&request, &Scope::empty()) else {
+            panic!("urn:rdf:transrept resolves");
+        };
+        let description = resolved.endpoint.describe();
+        let t = description
+            .transreption()
+            .expect("rdf-transrept is an ik:Transreptor");
+        // Sniffs its input, so opaque octet-stream is a valid `from`; html is output-only.
+        assert!(t.from.contains(&"application/octet-stream".to_string()));
+        assert!(t.from.contains(&"text/turtle".to_string()));
+        assert!(t.to.contains(&"application/rdf+xml".to_string()));
+        assert!(t.to.contains(&"text/html".to_string()));
+        assert!(
+            !t.from.contains(&"text/html".to_string()),
+            "html is output-only"
+        );
     }
 }

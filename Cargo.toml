@@ -11,7 +11,7 @@ repository = "https://github.com/ikigai-rs/ikigai-linkeddata"
 homepage = "https://github.com/ikigai-rs/ikigai-linkeddata"
 
 [workspace.dependencies]
-ikigai-core = "0.1.20"
+ikigai-core = "0.1.22"
 # Oxigraph's pure-Rust RDF crates — no rocksdb, so they compile to wasm32 (the
 # browser transrepts/queries client-side). The full store is in-memory only.
 oxrdf = "0.3"
