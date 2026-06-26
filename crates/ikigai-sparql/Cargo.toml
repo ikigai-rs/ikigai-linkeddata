@@ -12,6 +12,7 @@ categories = ["web-programming", "database"]
 
 [dependencies]
 ikigai-core = { workspace = true }
+ikigai-vocab = { workspace = true }
 oxigraph = { workspace = true }
 async-trait = "0.1"
 
