@@ -70,11 +70,10 @@ fn transrept(inv: &Invocation<'_>) -> Result<Representation> {
     // stable source (e.g. urn:kernel:catalog) yields a cacheable result while a live
     // fetch (no Cache-Control) yields an uncacheable one — cacheability flows down
     // the pipe rather than being asserted unconditionally here.
-    Ok(Representation::new(
-        ReprType::new(&media).with_param("charset", "utf-8"),
-        bytes,
+    Ok(
+        Representation::new(ReprType::new(&media).with_param("charset", "utf-8"), bytes)
+            .cacheable(),
     )
-    .cacheable())
 }
 
 /// The pure transformation, factored out so it's testable without an [`Invocation`]:
