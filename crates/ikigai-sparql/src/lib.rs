@@ -7,6 +7,14 @@
 //! each loaded as a named graph (named by its URI) with the query's default graph set to
 //! their union — so simple queries span all of them and `GRAPH <uri> { … }` addresses one.
 //!
+//! The **ikigai vocabulary** (`urn:ikigai:vocab` — the `ns#` ontology: `ik:Transreptor
+//! rdfs:subClassOf ik:Endpoint` and the property defs) is **always loaded** as a named
+//! graph and folded into the union default graph, so a catalog query can join endpoint
+//! *instances* against the *schema* with no extra `graph=` — e.g.
+//! `?e rdf:type/rdfs:subClassOf* ik:Endpoint` walks the class hierarchy (Oxigraph has no
+//! reasoner, so the `subClassOf` axiom is traversed explicitly via a property path).
+//! Because `graph=` is therefore optional, a query may run against the vocabulary alone.
+//!
 //! Results content-negotiate via `as=`: SELECT/ASK serialize as `application/sparql-
 //! results+json` (default) / `+xml` / `text/csv` / `text/tab-separated-values`;
 //! CONSTRUCT/DESCRIBE serialize as RDF (`text/turtle` default / N-Triples / …), which
@@ -40,6 +48,25 @@ pub fn space() -> EndpointSpace {
     space
 }
 
+/// A fresh in-memory store pre-seeded with the bundled ikigai vocabulary, loaded as the
+/// named graph `urn:ikigai:vocab`. Bundled (`include_str!` via `ikigai_vocab::VOCABULARY`)
+/// rather than resolved through the kernel, so the schema is present even when no host
+/// mounts `urn:ikigai:vocab`; it's static, so it carries no golden thread and doesn't
+/// affect cacheability. Callers add their `graph=` sources on top, then union the default
+/// graph — so `?e rdf:type/rdfs:subClassOf* ik:Endpoint` joins instances to this schema.
+fn store_with_vocabulary() -> Result<Store> {
+    let store = Store::new().map_err(|e| Error::Endpoint(format!("store init: {e}")))?;
+    let vocab_graph = NamedNodeRef::new(ikigai_vocab::VOCAB_IRI)
+        .map_err(|e| Error::Endpoint(format!("vocab graph name: {e}")))?;
+    store
+        .load_from_slice(
+            RdfParser::from_format(RdfFormat::Turtle).with_default_graph(vocab_graph),
+            ikigai_vocab::VOCABULARY.as_bytes(),
+        )
+        .map_err(|e| Error::Endpoint(format!("loading the ikigai vocabulary: {e}")))?;
+    Ok(store)
+}
+
 struct SparqlEndpoint;
 
 #[async_trait]
@@ -48,18 +75,15 @@ impl Endpoint for SparqlEndpoint {
         let query_str = inv.inline_str("query").map_err(|_| {
             Error::Endpoint("urn:sparql:* needs a `query=<sparql>` argument".to_string())
         })?;
-        let graph_list = inv.inline_str("graph").map_err(|_| {
-            Error::Endpoint(
-                "urn:sparql:* needs `graph=<uri>` — one or more resolvable sources, \
-                 comma- or space-separated for federation"
-                    .to_string(),
-            )
-        })?;
+        // `graph=` is optional: the vocabulary graph (below) is always present, so a query
+        // can run against it alone. Listed sources federate on top of it.
+        let graph_list = inv.inline_str("graph").unwrap_or("");
 
-        // Build the dataset: each source resolved through the kernel and loaded as a
-        // named graph (named by its URI). `inv.source` records the source's golden
-        // thread, so the cached result invalidates when any source changes.
-        let store = Store::new().map_err(|e| Error::Endpoint(format!("store init: {e}")))?;
+        // Build the dataset, pre-seeded with the bundled ikigai vocabulary (see
+        // `store_with_vocabulary`). Each listed source is resolved through the kernel and
+        // loaded as a named graph (named by its URI). `inv.source` records the source's
+        // golden thread, so the cached result invalidates when any source changes.
+        let store = store_with_vocabulary()?;
         for uri in graph_list
             .split([',', ' ', '\n', '\t'])
             .map(str::trim)
@@ -105,7 +129,8 @@ impl Endpoint for SparqlEndpoint {
             .title("SPARQL query")
             .summary(
                 "Run a SPARQL query over one or more resolvable, cacheable graphs \
-                 (federation by listing graphs).",
+                 (federation by listing graphs). The ikigai vocabulary (urn:ikigai:vocab) \
+                 is always loaded, so endpoint instances can join the class/property schema.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
@@ -113,8 +138,9 @@ impl Endpoint for SparqlEndpoint {
                 ArgSpec::new("query").summary("the SPARQL query (SELECT/ASK/DESCRIBE/CONSTRUCT)"),
             )
             .input(ArgSpec::new("graph").summary(
-                "one or more graph source IRIs, comma- or space-separated; each resolved \
-                 through the kernel and loaded as a named graph",
+                "optional: one or more graph source IRIs, comma- or space-separated; each \
+                 resolved through the kernel and loaded as a named graph. Omit to query the \
+                 always-present ikigai vocabulary alone.",
             ))
             .input(ArgSpec::new("as").summary(
                 "result representation: SELECT/ASK → application/sparql-results+json \
@@ -258,8 +284,9 @@ mod tests {
     const B: &str = r#"@prefix ex: <http://ex/> . ex:b ex:name "Bob" ."#;
 
     /// Test helper: load named graphs from inline Turtle, run a query, return (media, body).
+    /// Pre-seeds the bundled vocabulary exactly as production does (`store_with_vocabulary`).
     fn run(graphs: &[(&str, &str)], query: &str, as_type: Option<&str>) -> (String, String) {
-        let store = Store::new().unwrap();
+        let store = store_with_vocabulary().unwrap();
         for (uri, ttl) in graphs {
             store
                 .load_from_slice(
@@ -336,6 +363,58 @@ mod tests {
         assert!(
             only_b.contains("Bob") && !only_b.contains("Ada"),
             "named graph isolates"
+        );
+    }
+
+    /// A catalog-like graph holds endpoint *instances*; the always-loaded vocabulary holds
+    /// the `ik:Transreptor rdfs:subClassOf ik:Endpoint` axiom. A property-path query joins
+    /// them — finding the transreptor as an ik:Endpoint with no reasoner and no extra graph.
+    const CATALOG: &str = r#"@prefix ik: <https://ikigai-rs.dev/ns#> .
+        <urn:fn:toUpper>     a ik:Endpoint ; ik:id "toUpper" .
+        <urn:rdf:transrept>  a ik:Endpoint, ik:Transreptor ; ik:id "rdf-transrept" ;
+                             ik:transreptsFrom "text/turtle" ; ik:transreptsTo "text/html" ."#;
+
+    #[test]
+    fn vocabulary_is_always_present_for_schema_queries() {
+        // No `graph=` at all: the bundled vocabulary alone answers a schema question.
+        let (_, body) = run(
+            &[],
+            "PREFIX ik: <https://ikigai-rs.dev/ns#> PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
+             ASK { ik:Transreptor rdfs:subClassOf ik:Endpoint }",
+            None,
+        );
+        assert!(
+            body.contains("true"),
+            "vocab carries the subClassOf axiom: {body}"
+        );
+    }
+
+    #[test]
+    fn subclass_path_finds_transreptors_as_endpoints() {
+        // Walk rdf:type/rdfs:subClassOf*: every endpoint, transreptors included, via the
+        // axiom from the always-present vocabulary joined to the catalog instances.
+        let (_, all) = run(
+            &[("urn:kernel:catalog", CATALOG)],
+            "PREFIX ik: <https://ikigai-rs.dev/ns#> PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
+             SELECT ?id WHERE { ?e a/rdfs:subClassOf* ik:Endpoint ; ik:id ?id }",
+            Some("text/csv"),
+        );
+        assert!(all.contains("toUpper"), "plain endpoint: {all}");
+        assert!(
+            all.contains("rdf-transrept"),
+            "transreptor counts as an endpoint: {all}"
+        );
+
+        // And the transreptor is selectable by its declared conversion.
+        let (_, html_producers) = run(
+            &[("urn:kernel:catalog", CATALOG)],
+            "PREFIX ik: <https://ikigai-rs.dev/ns#> \
+             SELECT ?id WHERE { ?e a ik:Transreptor ; ik:id ?id ; ik:transreptsTo \"text/html\" }",
+            Some("text/csv"),
+        );
+        assert!(
+            html_producers.contains("rdf-transrept") && !html_producers.contains("toUpper"),
+            "only the transreptor that produces text/html: {html_producers}"
         );
     }
 }
