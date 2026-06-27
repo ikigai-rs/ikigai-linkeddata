@@ -1,11 +1,16 @@
-//! `ikigai-sniff` — content-type sniffing as an ikigai resource.
+//! `ikigai-sniff` — content-type sniffing **and dispatch** as ikigai resources.
 //!
 //! `urn:sniff` answers the question *"what is this blob?"* — given opaque bytes (the
 //! `application/octet-stream` an HTTP fetch with a missing/wrong `Content-Type`, a file
 //! read, a pasted payload, or a content-addressed blob delivers), it returns a **concrete
-//! media type**. That's the first half of *octet-stream sniff-and-dispatch*: once the real
-//! type is known, [`ikigai-core`](ikigai_core)'s transreptor selection can route the bytes
-//! to the right converter (the dispatch half).
+//! media type**. That's the first half of *octet-stream sniff-and-dispatch*.
+//!
+//! `urn:transrept:auto` is the second half: it sniffs the piped bytes, then asks the kernel
+//! for a transreptor chain from the *detected* type to the requested `as=` ([`Invocation::
+//! select_transreptor`](ikigai_core::Invocation::select_transreptor)) and runs it — so a
+//! caller can transrept opaque bytes **without knowing their input type**. (When the bytes
+//! already are the requested type it's a pass-through; when nothing converts them it's a
+//! clean error.)
 //!
 //! Detection is **heuristic only** — it inspects the opening bytes, it does not parse — so
 //! it is cheap and total. v1 covers the linked-data / text family:
@@ -26,9 +31,10 @@
 
 #![forbid(unsafe_code)]
 
+use async_trait::async_trait;
 use ikigai_core::{
-    ArgSpec, Description, EndpointSpace, Error, Exact, FnEndpoint, Invocation, ReprType,
-    Representation, Result, Verb,
+    ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, FnEndpoint, Invocation,
+    Iri, ReprType, Representation, Request, Result, Verb,
 };
 
 // The media types v1 detects. `text/turtle` stands in for the whole RDF text family
@@ -191,26 +197,92 @@ fn is_text(bytes: &[u8]) -> bool {
     !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
 }
 
-/// The space binding `urn:sniff`. Mount it in any kernel to classify opaque bytes.
+/// The space binding `urn:sniff` (classify opaque bytes) and `urn:transrept:auto` (sniff,
+/// then dispatch to the matching transreptor chain). Mount it in any kernel.
 pub fn space() -> EndpointSpace {
-    EndpointSpace::new().bind(
-        Exact::new("urn:sniff"),
-        FnEndpoint::new("sniff", |inv: &Invocation<'_>| sniff_endpoint(inv)).with_description(
-            Description::new("sniff")
-                .title("Content-type sniff")
-                .summary(
-                    "Detect the concrete media type of opaque bytes (the first step of \
-                     octet-stream sniff-and-dispatch). Pipe a resource in; returns the \
-                     detected media type as text/plain.",
-                )
-                .verb(Verb::Source)
-                .verb(Verb::Meta)
-                .input(ArgSpec::new("content").summary(
-                    "the bytes to classify — usually piped in (e.g. from urn:httpGet or a file)",
-                ))
-                .output("text/plain;charset=utf-8"),
-        ),
-    )
+    EndpointSpace::new()
+        .bind(
+            Exact::new("urn:sniff"),
+            FnEndpoint::new("sniff", |inv: &Invocation<'_>| sniff_endpoint(inv)).with_description(
+                Description::new("sniff")
+                    .title("Content-type sniff")
+                    .summary(
+                        "Detect the concrete media type of opaque bytes (the first step of \
+                         octet-stream sniff-and-dispatch). Pipe a resource in; returns the \
+                         detected media type as text/plain.",
+                    )
+                    .verb(Verb::Source)
+                    .verb(Verb::Meta)
+                    .input(ArgSpec::new("content").summary(
+                        "the bytes to classify — usually piped in (e.g. from urn:httpGet or a file)",
+                    ))
+                    .output("text/plain;charset=utf-8"),
+            ),
+        )
+        .bind(Exact::new("urn:transrept:auto"), AutoTransrept)
+}
+
+/// `urn:transrept:auto` — sniff the piped bytes, then transrept them to `as=` by selecting
+/// and running the matching transreptor chain. The convenience that needs no input-type
+/// knowledge: dereference an opaque resource straight into the representation you want.
+struct AutoTransrept;
+
+#[async_trait]
+impl Endpoint for AutoTransrept {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let bytes = inv.inline_arg("content").map_err(|_| {
+            Error::Endpoint(
+                "urn:transrept:auto needs bytes — pipe a resource into it (e.g. \
+                 `source urn:httpGet url=… | urn:transrept:auto as=text/html`) or pass `content=…`"
+                    .to_string(),
+            )
+        })?;
+        let from = sniff(bytes);
+        let to = inv.inline_str("as").unwrap_or(TURTLE);
+
+        // Already the requested type → pass through (re-typed from octet-stream to what it is).
+        if from == to {
+            return Ok(Representation::new(ReprType::new(from), bytes.to_vec()).cacheable());
+        }
+
+        let plan = inv.select_transreptor(from, to).ok_or_else(|| {
+            Error::Endpoint(format!(
+                "urn:transrept:auto: no transreptor from sniffed `{from}` to `{to}`"
+            ))
+        })?;
+
+        // Run the chain: each step takes the running bytes as `content` and its target as `as`.
+        let mut current = Representation::new(ReprType::new(from), bytes.to_vec());
+        for step in plan {
+            let iri = Iri::parse(&step.endpoint).map_err(|e| {
+                Error::Endpoint(format!("bad transreptor IRI `{}`: {e}", step.endpoint))
+            })?;
+            let request = Request::new(Verb::Source, iri)
+                .with_arg("content", ArgRef::Inline(current.bytes))
+                .with_arg("as", ArgRef::Inline(step.to.into_bytes()));
+            current = inv.issue(request).await?;
+        }
+        Ok(current.cacheable())
+    }
+
+    fn name(&self) -> &str {
+        "transrept-auto"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("transrept-auto")
+            .title("Auto-transrept")
+            .summary(
+                "Sniff opaque bytes, then transrept them to `as` by selecting the matching \
+                 transreptor chain — content negotiation without knowing the input type.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(ArgSpec::new("content").summary(
+                "the bytes to transrept — usually piped in (e.g. from urn:httpGet or a file)",
+            ))
+            .input(ArgSpec::new("as").summary("target media type (default text/turtle)"))
+    }
 }
 
 /// Resolve a sniff request: read the bytes from `content` and return the detected media type.
@@ -304,5 +376,69 @@ mod tests {
             description.transreption().is_none(),
             "sniff classifies, it doesn't convert"
         );
+    }
+
+    // --- urn:transrept:auto (sniff → dispatch), end-to-end through a kernel ---
+
+    use ikigai_core::{Capability, Kernel};
+    use std::sync::Arc;
+
+    /// A stub auto-invocable transreptor turtle → text/html that wraps its `content`, so a
+    /// test can see it ran and that the right bytes flowed through.
+    fn stub_turtle_to_html() -> FnEndpoint {
+        FnEndpoint::new("ttl2html", |inv: &Invocation<'_>| {
+            let content = inv.inline_str("content").unwrap_or("");
+            Ok(Representation::new(
+                ReprType::new("text/html"),
+                format!("<table>{content}</table>").into_bytes(),
+            ))
+        })
+        .with_description(
+            Description::new("ttl2html")
+                .verb(Verb::Source)
+                .input(ArgSpec::new("content"))
+                .input(ArgSpec::new("as"))
+                .transreptor(["text/turtle"], ["text/html"]),
+        )
+    }
+
+    fn auto_kernel() -> Kernel {
+        let space = space().bind(Exact::new("urn:rdf:transrept"), stub_turtle_to_html());
+        Kernel::new(Arc::new(space))
+    }
+
+    fn run_auto(content: &[u8], as_type: &str) -> Result<Representation> {
+        let request = Request::new(Verb::Source, Iri::parse("urn:transrept:auto").unwrap())
+            .with_arg("content", ArgRef::Inline(content.to_vec()))
+            .with_arg("as", ArgRef::Inline(as_type.as_bytes().to_vec()));
+        futures::executor::block_on(auto_kernel().issue(request, &Capability::root()))
+    }
+
+    #[test]
+    fn auto_sniffs_opaque_bytes_then_dispatches() {
+        // Turtle bytes (as a server might hand them back untyped) → text/html, with no input
+        // type asserted: auto sniffs text/turtle, selects the turtle→html transreptor, runs it.
+        let rep = run_auto(b"@prefix ex: <http://e/> . ex:a ex:b ex:c .", "text/html").unwrap();
+        assert_eq!(rep.repr_type.media_type, "text/html");
+        let body = String::from_utf8(rep.bytes).unwrap();
+        assert!(body.starts_with("<table>"), "transreptor ran: {body}");
+        assert!(body.contains("ex:a"), "over the sniffed turtle: {body}");
+    }
+
+    #[test]
+    fn auto_passes_through_when_already_the_target_type() {
+        let rep = run_auto(b"@prefix ex: <http://e/> . ex:a ex:b ex:c .", "text/turtle").unwrap();
+        assert_eq!(rep.repr_type.media_type, "text/turtle");
+        assert!(String::from_utf8(rep.bytes).unwrap().contains("ex:a"));
+    }
+
+    #[test]
+    fn auto_errors_cleanly_when_no_transreptor_reaches_the_target() {
+        let err = run_auto(
+            b"@prefix ex: <http://e/> . ex:a ex:b ex:c .",
+            "application/pdf",
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("no transreptor"), "{err}");
     }
 }

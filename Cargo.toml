@@ -11,7 +11,7 @@ repository = "https://github.com/ikigai-rs/ikigai-linkeddata"
 homepage = "https://github.com/ikigai-rs/ikigai-linkeddata"
 
 [workspace.dependencies]
-ikigai-core = "0.1.22"
+ikigai-core = "0.1.25"
 # The ikigai vocabulary (ns# ontology + Description→Turtle). ikigai-sparql bundles its
 # schema graph so endpoint instances can be joined against the class/property defs.
 ikigai-vocab = "0.1.22"
