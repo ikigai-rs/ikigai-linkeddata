@@ -17,6 +17,7 @@
 //!
 //! | bytes start with… | → media type |
 //! |---|---|
+//! | a binary magic signature (`%PDF-`, PNG, JPEG, GIF, gzip) | `application/pdf` / `image/*` / `application/gzip` |
 //! | `{` / `[` with a JSON-LD keyword (`@context`/`@id`/`@graph`/`@type`) | `application/ld+json` |
 //! | `{` / `[` otherwise | `application/json` |
 //! | `<!doctype html` / `<html` | `text/html` |
@@ -48,6 +49,12 @@ const JSON: &str = "application/json";
 const HTML: &str = "text/html";
 const PLAIN: &str = "text/plain";
 const OCTET: &str = "application/octet-stream";
+// Binary families, recognized by leading magic bytes.
+const PDF: &str = "application/pdf";
+const PNG: &str = "image/png";
+const JPEG: &str = "image/jpeg";
+const GIF: &str = "image/gif";
+const GZIP: &str = "application/gzip";
 
 /// A single content-type heuristic. Returns the detected media type if the bytes look like
 /// its family, else `None` so the next detector gets a turn. Implementations must not parse
@@ -64,12 +71,38 @@ pub trait Detector: Send + Sync {
 /// `application/octet-stream`.
 pub fn detectors() -> Vec<Box<dyn Detector>> {
     vec![
+        // Magic bytes first: an unambiguous binary signature beats any text heuristic, and a
+        // classified binary type makes the dispatch path (urn:transrept:auto) refuse it
+        // cleanly ("no transreptor from image/png to …") rather than mis-reading it as text.
+        Box::new(MagicDetector),
         Box::new(JsonDetector),
         // Turtle before Markup: both inspect a leading `<`, but they are mutually exclusive —
         // Turtle claims an `<scheme://…>` IRI subject, Markup claims an `<element` tag.
         Box::new(TurtleDetector),
         Box::new(MarkupDetector),
     ]
+}
+
+/// Binary families, recognized by leading magic bytes (checked at the very start — no
+/// whitespace skipping, since a binary signature may itself begin with a whitespace byte).
+struct MagicDetector;
+impl Detector for MagicDetector {
+    fn detect(&self, bytes: &[u8]) -> Option<&'static str> {
+        let sigs: &[(&[u8], &str)] = &[
+            (b"%PDF-", PDF),
+            (&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A], PNG),
+            (&[0xFF, 0xD8, 0xFF], JPEG),
+            (b"GIF87a", GIF),
+            (b"GIF89a", GIF),
+            (&[0x1F, 0x8B], GZIP),
+        ];
+        sigs.iter()
+            .find(|(sig, _)| bytes.starts_with(sig))
+            .map(|&(_, media)| media)
+    }
+    fn label(&self) -> &'static str {
+        "magic"
+    }
 }
 
 /// Detect the media type of `bytes`. Runs [`detectors`] in order; falls back to `text/plain`
@@ -353,8 +386,20 @@ mod tests {
     #[test]
     fn falls_back_to_text_then_octet_stream() {
         assert_eq!(sniff(b"just some prose, nothing structured"), PLAIN);
-        assert_eq!(sniff(&[0x89, 0x50, 0x4E, 0x47, 0x00, 0x01]), OCTET); // PNG-ish bytes (a NUL)
+        assert_eq!(sniff(&[0x01, 0x02, 0x00, 0x03]), OCTET); // unknown binary (a NUL)
         assert_eq!(sniff(b""), PLAIN); // empty is trivially valid UTF-8
+    }
+
+    #[test]
+    fn detects_binary_families_by_magic_bytes() {
+        assert_eq!(sniff(b"%PDF-1.7\n..."), PDF);
+        assert_eq!(
+            sniff(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00]),
+            PNG
+        );
+        assert_eq!(sniff(&[0xFF, 0xD8, 0xFF, 0xE0]), JPEG);
+        assert_eq!(sniff(b"GIF89a..."), GIF);
+        assert_eq!(sniff(&[0x1F, 0x8B, 0x08]), GZIP);
     }
 
     #[test]
@@ -440,5 +485,18 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err}").contains("no transreptor"), "{err}");
+    }
+
+    #[test]
+    fn auto_refuses_a_classified_binary_blob() {
+        // A PNG sniffs to image/png; nothing converts it to turtle, so dispatch refuses it
+        // cleanly (naming the sniffed type) rather than feeding binary to a graph parser.
+        let png = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01];
+        let err = run_auto(&png, "text/turtle").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no transreptor") && msg.contains("image/png"),
+            "{msg}"
+        );
     }
 }
