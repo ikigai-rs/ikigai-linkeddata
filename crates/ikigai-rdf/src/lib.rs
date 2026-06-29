@@ -22,8 +22,33 @@ use ikigai_core::{
     ArgSpec, Description, EndpointSpace, Error, Exact, FnEndpoint, Invocation, ReprType,
     Representation, Result, Verb,
 };
-use oxrdf::Quad;
+use oxrdf::{NamedOrBlankNode, Quad, Term};
 use oxrdfio::{RdfFormat, RdfParser, RdfSerializer};
+
+/// The `rdfs:subClassOf` IRI.
+const SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+
+/// Parse a Turtle alignment graph and return every `rdfs:subClassOf` axiom as a
+/// `(subclass, superclass)` IRI pair — the closure pairs a host feeds to the kernel's
+/// type-aware action selection (`Kernel::with_subclass_axioms`), so an entity typed
+/// `foaf:Person` satisfies a `schema:Person` action. Best-effort: triples whose subject or
+/// object isn't an IRI (blank nodes, literals) and any unparseable triples are skipped —
+/// `subClassOf` relates named classes.
+pub fn subclass_axioms(turtle: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for quad in RdfParser::from_format(RdfFormat::Turtle).for_slice(turtle.as_bytes()) {
+        let Ok(quad) = quad else { continue };
+        if quad.predicate.as_str() != SUBCLASS_OF {
+            continue;
+        }
+        if let (NamedOrBlankNode::NamedNode(sub), Term::NamedNode(sup)) =
+            (&quad.subject, &quad.object)
+        {
+            pairs.push((sub.as_str().to_string(), sup.as_str().to_string()));
+        }
+    }
+    pairs
+}
 
 /// The space binding `urn:rdf:transrept`. Mount it in any kernel (the CLI's embedded
 /// space, the in-browser kernel) to give it RDF content negotiation.
@@ -231,6 +256,32 @@ mod tests {
     fn body(input: &str, as_type: &str) -> String {
         let (_, bytes) = transrept_bytes(input.as_bytes(), as_type).unwrap();
         String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn subclass_axioms_extracts_rdfs_subclassof_pairs() {
+        let ttl = r#"@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix schema: <https://schema.org/> .
+foaf:Person rdfs:subClassOf schema:Person .
+schema:Person rdfs:subClassOf schema:Thing .
+foaf:Person foaf:name "ignored" ."#;
+        let mut pairs = subclass_axioms(ttl);
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                (
+                    "http://xmlns.com/foaf/0.1/Person".to_string(),
+                    "https://schema.org/Person".to_string()
+                ),
+                (
+                    "https://schema.org/Person".to_string(),
+                    "https://schema.org/Thing".to_string()
+                ),
+            ],
+            "only the two rdfs:subClassOf triples, as IRI pairs"
+        );
     }
 
     #[test]
