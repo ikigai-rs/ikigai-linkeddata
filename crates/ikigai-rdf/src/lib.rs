@@ -19,10 +19,10 @@
 #![forbid(unsafe_code)]
 
 use ikigai_core::{
-    ArgSpec, Description, EndpointSpace, Error, Exact, FnEndpoint, Invocation, ReprType,
-    Representation, Result, Verb,
+    ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, FnEndpoint, Invocation, Iri,
+    ReprType, Representation, Result, Verb,
 };
-use oxrdf::{NamedOrBlankNode, Quad, Term};
+use oxrdf::{Graph, NamedOrBlankNode, Quad, Term};
 use oxrdfio::{RdfFormat, RdfParser, RdfSerializer};
 
 /// The `rdfs:subClassOf` IRI.
@@ -52,55 +52,216 @@ pub fn subclass_axioms(turtle: &str) -> Vec<(String, String)> {
 
 /// The space binding `urn:rdf:transrept`. Mount it in any kernel (the CLI's embedded
 /// space, the in-browser kernel) to give it RDF content negotiation.
+/// Parse Turtle into an [`oxrdf::Graph`] — a triple SET, so union is `extend`
+/// and difference is a filter. Works because our event graphs are SKOLEMIZED
+/// (no blank nodes): graph equality is set equality, never isomorphism.
+fn parse_graph(turtle: &str, who: &str) -> Result<Graph> {
+    let mut graph = Graph::default();
+    for quad in RdfParser::from_format(RdfFormat::Turtle).for_slice(turtle.as_bytes()) {
+        let quad = quad.map_err(|e| Error::Endpoint(format!("{who}: RDF parse error: {e}")))?;
+        graph.insert(&quad.into());
+    }
+    Ok(graph)
+}
+
+fn serialize_graph(graph: &Graph) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut serializer = RdfSerializer::from_format(RdfFormat::Turtle).for_writer(&mut out);
+    for triple in graph.iter() {
+        serializer
+            .serialize_triple(triple)
+            .map_err(|e| Error::Endpoint(format!("RDF serialize error: {e}")))?;
+    }
+    serializer
+        .finish()
+        .map_err(|e| Error::Endpoint(format!("RDF serialize error: {e}")))?;
+    Ok(out)
+}
+
+/// The second graph: the `with=` argument — inline Turtle when it starts like a
+/// document, else an IRI sourced through the kernel (the compact-context
+/// pattern: inline literal OR resolve the reference).
+async fn with_graph(inv: &Invocation<'_>, who: &str) -> Result<Graph> {
+    let with = inv.inline_str("with").map_err(|_| {
+        Error::Endpoint(format!("{who}: needs with= (a graph IRI or inline Turtle)"))
+    })?;
+    if with.trim_start().starts_with('@') || with.trim_start().starts_with('<') {
+        return parse_graph(with, who);
+    }
+    // Compose-marker convention: `with=<iri>?k=v&…` carries request arguments
+    // (e.g. urn:org:agenda:week?as=text/turtle asks for the Turtle face).
+    let (iri_str, query) = match with.split_once('?') {
+        Some((iri, query)) => (iri, Some(query)),
+        None => (with, None),
+    };
+    let iri = Iri::parse(iri_str)
+        .map_err(|e| Error::Endpoint(format!("{who}: with= is neither Turtle nor an IRI: {e}")))?;
+    let mut request = ikigai_core::Request::new(Verb::Source, iri);
+    if let Some(query) = query {
+        for pair in query.split('&') {
+            if let Some((key, value)) = pair.split_once('=') {
+                request =
+                    request.with_arg(key, ikigai_core::ArgRef::Inline(value.as_bytes().to_vec()));
+            }
+        }
+    }
+    let repr = inv.issue(request).await?;
+    let text = String::from_utf8(repr.bytes)
+        .map_err(|_| Error::Endpoint(format!("{who}: {with} is not UTF-8 Turtle")))?;
+    parse_graph(&text, who)
+}
+
+/// `urn:rdf:union` — the piped graph ∪ the `with=` graph, as Turtle. Set
+/// semantics: identical triples merge; skolemized IRIs make cross-source
+/// identity literal (the org∪calendar merged view).
+struct UnionEndpoint;
+
+#[async_trait::async_trait]
+impl Endpoint for UnionEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let content = inv
+            .inline_str("content")
+            .map_err(|_| Error::Endpoint("urn:rdf:union: pipe a Turtle graph in".to_string()))?;
+        let mut graph = parse_graph(content, "urn:rdf:union")?;
+        for triple in with_graph(inv, "urn:rdf:union").await?.iter() {
+            graph.insert(triple);
+        }
+        Ok(Representation::new(
+            ReprType::new("text/turtle").with_param("charset", "utf-8"),
+            serialize_graph(&graph)?,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "rdf-union"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("rdf-union")
+            .title("Graph union")
+            .summary(
+                "The piped Turtle graph ∪ the with= graph (an IRI resolved through the                  kernel, or inline Turtle) — set semantics over skolemized triples.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(ArgSpec::new("content").summary("the base Turtle graph — usually piped in"))
+            .input(ArgSpec::new("with").summary("the graph to union in: an IRI or inline Turtle"))
+            .output("text/turtle")
+    }
+}
+
+/// `urn:rdf:diff` — the triples on one side only. `mode=added` (default): in the
+/// piped graph but not `with=` — what a sync must CREATE; `mode=removed`: in
+/// `with=` but not the piped graph — what it must DELETE. Two calls, two
+/// resources: the delta a materialized view applies.
+struct DiffEndpoint;
+
+#[async_trait::async_trait]
+impl Endpoint for DiffEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let content = inv
+            .inline_str("content")
+            .map_err(|_| Error::Endpoint("urn:rdf:diff: pipe a Turtle graph in".to_string()))?;
+        let mode = inv.inline_str("mode").unwrap_or("added");
+        let ours = parse_graph(content, "urn:rdf:diff")?;
+        let theirs = with_graph(inv, "urn:rdf:diff").await?;
+        let (keep, exclude) = match mode {
+            "added" => (&ours, &theirs),
+            "removed" => (&theirs, &ours),
+            other => {
+                return Err(Error::Endpoint(format!(
+                    "urn:rdf:diff: mode must be added or removed, not `{other}`"
+                )))
+            }
+        };
+        let mut delta = Graph::default();
+        for triple in keep.iter() {
+            if !exclude.contains(triple) {
+                delta.insert(triple);
+            }
+        }
+        Ok(Representation::new(
+            ReprType::new("text/turtle").with_param("charset", "utf-8"),
+            serialize_graph(&delta)?,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "rdf-diff"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("rdf-diff")
+            .title("Graph difference")
+            .summary(
+                "Triples on one side only. mode=added (default): in the piped graph, not                  in with= — what a sync creates. mode=removed: in with=, not in the piped                  graph — what it deletes.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(ArgSpec::new("content").summary("the desired Turtle graph — usually piped in"))
+            .input(ArgSpec::new("with").summary("the current graph: an IRI or inline Turtle"))
+            .input(
+                ArgSpec::new("mode")
+                    .summary("added (default) or removed")
+                    .optional(),
+            )
+            .output("text/turtle")
+    }
+}
+
 pub fn space() -> EndpointSpace {
-    EndpointSpace::new().bind(
-        Exact::new("urn:rdf:transrept"),
-        FnEndpoint::new("rdf-transrept", |inv: &Invocation<'_>| transrept(inv)).with_description(
-            Description::new("rdf-transrept")
-                .title("RDF transreption")
-                .summary(
-                    "Re-serialize an RDF graph into another syntax — client-side content \
+    EndpointSpace::new()
+        .bind(Exact::new("urn:rdf:union"), UnionEndpoint)
+        .bind(Exact::new("urn:rdf:diff"), DiffEndpoint)
+        .bind(
+            Exact::new("urn:rdf:transrept"),
+            FnEndpoint::new("rdf-transrept", |inv: &Invocation<'_>| transrept(inv))
+                .with_description(
+                Description::new("rdf-transrept")
+                    .title("RDF transreption")
+                    .summary(
+                        "Re-serialize an RDF graph into another syntax — client-side content \
                      negotiation. Pipe a resource in and choose `as`.",
-                )
-                .verb(Verb::Source)
-                .verb(Verb::Meta)
-                .input(ArgSpec::new("content").summary(
-                    "the RDF document to transrept — usually piped in (e.g. from urn:httpGet)",
-                ))
-                .input(ArgSpec::new("as").summary(
-                    "target representation: text/turtle (default), application/n-triples, \
+                    )
+                    .verb(Verb::Source)
+                    .verb(Verb::Meta)
+                    .input(ArgSpec::new("content").summary(
+                        "the RDF document to transrept — usually piped in (e.g. from urn:httpGet)",
+                    ))
+                    .input(ArgSpec::new("as").summary(
+                        "target representation: text/turtle (default), application/n-triples, \
                      application/n-quads, application/trig, application/rdf+xml, \
                      application/ld+json, or text/html",
-                ))
-                .output("text/turtle;charset=utf-8")
-                // First-class `ik:Transreptor`: the media types it converts between. The
-                // input syntax is *sniffed* (see `sniff`), so it accepts opaque
-                // `application/octet-stream` too — the universal "raw, not-yet-typed
-                // bytes" a fetch or file read delivers. `text/html` is output-only (the
-                // human subject/predicate/object table). Drives selection: a single
-                // auto-invocable hop (`content` + `as`) over any of these.
-                .transreptor(
-                    [
-                        "text/turtle",
-                        "application/n-triples",
-                        "application/n-quads",
-                        "application/trig",
-                        "application/rdf+xml",
-                        "application/ld+json",
-                        "application/octet-stream",
-                    ],
-                    [
-                        "text/turtle",
-                        "application/n-triples",
-                        "application/n-quads",
-                        "application/trig",
-                        "application/rdf+xml",
-                        "application/ld+json",
-                        "text/html",
-                    ],
-                ),
-        ),
-    )
+                    ))
+                    .output("text/turtle;charset=utf-8")
+                    // First-class `ik:Transreptor`: the media types it converts between. The
+                    // input syntax is *sniffed* (see `sniff`), so it accepts opaque
+                    // `application/octet-stream` too — the universal "raw, not-yet-typed
+                    // bytes" a fetch or file read delivers. `text/html` is output-only (the
+                    // human subject/predicate/object table). Drives selection: a single
+                    // auto-invocable hop (`content` + `as`) over any of these.
+                    .transreptor(
+                        [
+                            "text/turtle",
+                            "application/n-triples",
+                            "application/n-quads",
+                            "application/trig",
+                            "application/rdf+xml",
+                            "application/ld+json",
+                            "application/octet-stream",
+                        ],
+                        [
+                            "text/turtle",
+                            "application/n-triples",
+                            "application/n-quads",
+                            "application/trig",
+                            "application/rdf+xml",
+                            "application/ld+json",
+                            "text/html",
+                        ],
+                    ),
+            ),
+        )
 }
 
 /// Resolve a transreption request: read the RDF from `content` (piped or named), the
@@ -249,6 +410,87 @@ fn esc(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::executor::block_on;
+    use ikigai_core::{Capability, Kernel, Request};
+    use std::sync::Arc;
+
+    const GRAPH_A: &str = r#"<urn:event:1> <urn:p:summary> "Standup" .
+<urn:event:2> <urn:p:summary> "Dinner" ."#;
+    const GRAPH_B: &str = r#"<urn:event:2> <urn:p:summary> "Dinner" .
+<urn:event:3> <urn:p:summary> "Dentist" ."#;
+
+    fn graph_kernel() -> Kernel {
+        // urn:test:b serves GRAPH_B so with= can resolve by reference.
+        let space = space().bind(
+            Exact::new("urn:test:b"),
+            FnEndpoint::new("b", |_inv: &Invocation<'_>| {
+                Ok(Representation::new(
+                    ReprType::new("text/turtle"),
+                    GRAPH_B.as_bytes().to_vec(),
+                ))
+            }),
+        );
+        Kernel::new(Arc::new(space))
+    }
+
+    fn run(iri: &str, args: &[(&str, &str)]) -> Graph {
+        let kernel = graph_kernel();
+        let mut request = Request::new(Verb::Source, Iri::parse(iri).unwrap());
+        for (k, v) in args {
+            request = request.with_arg(*k, ikigai_core::ArgRef::Inline(v.as_bytes().to_vec()));
+        }
+        let out = block_on(kernel.issue(request, &Capability::root())).unwrap();
+        parse_graph(&String::from_utf8(out.bytes).unwrap(), "test").unwrap()
+    }
+
+    #[test]
+    fn union_merges_with_set_semantics() {
+        let merged = run(
+            "urn:rdf:union",
+            &[("content", GRAPH_A), ("with", "urn:test:b")],
+        );
+        // 2 + 2 triples with 1 shared -> 3, not 4: identical triples merge.
+        assert_eq!(merged.len(), 3);
+    }
+
+    #[test]
+    fn diff_added_and_removed_split_the_delta() {
+        let added = run(
+            "urn:rdf:diff",
+            &[("content", GRAPH_A), ("with", "urn:test:b")],
+        );
+        assert_eq!(added.len(), 1, "only urn:event:1 is new");
+        assert!(added
+            .iter()
+            .next()
+            .unwrap()
+            .subject
+            .to_string()
+            .contains("urn:event:1"));
+
+        let removed = run(
+            "urn:rdf:diff",
+            &[
+                ("content", GRAPH_A),
+                ("with", "urn:test:b"),
+                ("mode", "removed"),
+            ],
+        );
+        assert_eq!(removed.len(), 1, "only urn:event:3 is gone");
+        assert!(removed
+            .iter()
+            .next()
+            .unwrap()
+            .subject
+            .to_string()
+            .contains("urn:event:3"));
+    }
+
+    #[test]
+    fn with_accepts_inline_turtle_too() {
+        let merged = run("urn:rdf:union", &[("content", GRAPH_A), ("with", GRAPH_B)]);
+        assert_eq!(merged.len(), 3);
+    }
 
     const TTL: &str = r#"@prefix foaf: <http://xmlns.com/foaf/0.1/> .
 <http://example.org/me> foaf:name "Ada" ; foaf:knows <http://example.org/you> ."#;
