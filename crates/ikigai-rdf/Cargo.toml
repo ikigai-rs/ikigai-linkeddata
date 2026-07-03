@@ -11,6 +11,7 @@ keywords = ["ikigai", "roc", "rdf", "transreption", "oxigraph"]
 categories = ["web-programming", "parser-implementations"]
 
 [dependencies]
+async-trait = "0.1"
 ikigai-core = { workspace = true }
 oxrdfio = { workspace = true }
 oxrdf = { workspace = true }
@@ -19,3 +20,6 @@ oxrdf = { workspace = true }
 # with the `getrandom_backend` cfg in .cargo/config.toml). Not used directly.
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[dev-dependencies]
+futures = "0.3"
