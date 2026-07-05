@@ -202,8 +202,9 @@ impl Endpoint for DiffEndpoint {
             .input(ArgSpec::new("with").summary("the current graph: an IRI or inline Turtle"))
             .input(
                 ArgSpec::new("mode")
-                    .summary("added (default) or removed")
-                    .optional(),
+                    .summary("which side of the diff to keep")
+                    .one_of(["added", "removed"])
+                    .default_value("added"),
             )
             .output("text/turtle")
     }
