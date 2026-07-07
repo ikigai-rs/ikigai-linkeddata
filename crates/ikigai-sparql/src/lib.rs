@@ -39,11 +39,20 @@ use oxigraph::store::Store;
 
 /// The four SPARQL verbs as resources. All four resolve identically — the query form
 /// (SELECT/ASK/CONSTRUCT/DESCRIBE) determines the result shape — but they're distinct,
-/// discoverable IRIs.
+/// discoverable IRIs, each carrying a UNIQUE description id (`sparql-{form}`) so their
+/// catalog subjects and any id-keyed projection (an MCP tool name) don't collide.
 pub fn space() -> EndpointSpace {
     let mut space = EndpointSpace::new();
-    for verb in ["select", "ask", "describe", "construct"] {
-        space = space.bind(Exact::new(format!("urn:sparql:{verb}")), SparqlEndpoint);
+    for (verb, id) in [
+        ("select", "sparql-select"),
+        ("ask", "sparql-ask"),
+        ("describe", "sparql-describe"),
+        ("construct", "sparql-construct"),
+    ] {
+        space = space.bind(
+            Exact::new(format!("urn:sparql:{verb}")),
+            SparqlEndpoint { verb, id },
+        );
     }
     space
 }
@@ -67,7 +76,15 @@ fn store_with_vocabulary() -> Result<Store> {
     Ok(store)
 }
 
-struct SparqlEndpoint;
+/// One SPARQL query form bound to `urn:sparql:{verb}`. Resolution is identical across all
+/// four (the query itself carries the form); only the *identity* differs — `id` is a
+/// UNIQUE description id (`sparql-select`/`…-ask`/`…-describe`/`…-construct`) so the catalog
+/// subject (`urn:ikigai:endpoint:{id}`) and any id-keyed projection (an MCP tool name)
+/// stay distinct. `verb` is the bare form, used only to label the title.
+struct SparqlEndpoint {
+    verb: &'static str,
+    id: &'static str,
+}
 
 #[async_trait]
 impl Endpoint for SparqlEndpoint {
@@ -121,12 +138,12 @@ impl Endpoint for SparqlEndpoint {
     }
 
     fn name(&self) -> &str {
-        "sparql"
+        self.id
     }
 
     fn describe(&self) -> Description {
-        Description::new("sparql")
-            .title("SPARQL query")
+        Description::new(self.id)
+            .title(format!("SPARQL {}", self.verb.to_uppercase()))
             .summary(
                 "Run a SPARQL query over one or more resolvable, cacheable graphs \
                  (federation by listing graphs). The ikigai vocabulary (urn:ikigai:vocab) \
@@ -137,16 +154,24 @@ impl Endpoint for SparqlEndpoint {
             .input(
                 ArgSpec::new("query").summary("the SPARQL query (SELECT/ASK/DESCRIBE/CONSTRUCT)"),
             )
-            .input(ArgSpec::new("graph").summary(
-                "optional: one or more graph source IRIs, comma- or space-separated; each \
-                 resolved through the kernel and loaded as a named graph. Omit to query the \
-                 always-present ikigai vocabulary alone.",
-            ))
-            .input(ArgSpec::new("as").summary(
-                "result representation: SELECT/ASK → application/sparql-results+json \
-                 (default), +xml, text/csv, text/tab-separated-values; CONSTRUCT/DESCRIBE \
-                 → text/turtle (default), application/n-triples, …",
-            ))
+            .input(
+                ArgSpec::new("graph")
+                    .summary(
+                        "optional: one or more graph source IRIs, comma- or space-separated; \
+                         each resolved through the kernel and loaded as a named graph. Omit to \
+                         query the always-present ikigai vocabulary alone.",
+                    )
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("as")
+                    .summary(
+                        "result representation: SELECT/ASK → application/sparql-results+json \
+                         (default), +xml, text/csv, text/tab-separated-values; \
+                         CONSTRUCT/DESCRIBE → text/turtle (default), application/n-triples, …",
+                    )
+                    .optional(),
+            )
             .output("application/sparql-results+json")
     }
 }
@@ -301,6 +326,62 @@ mod tests {
         let results = prepared.on_store(&store).execute().unwrap();
         let (media, bytes) = serialize_results(results, as_type).unwrap();
         (media, String::from_utf8(bytes).unwrap())
+    }
+
+    /// Every bound `urn:sparql:{verb}` must project a DISTINCT description id (and name) —
+    /// else all four collide to one catalog subject and one MCP tool (the 4× dupe that F4
+    /// fixed). Guards against the single-constant id regressing back in.
+    #[test]
+    fn each_form_has_a_unique_id_and_name() {
+        let endpoints = [
+            SparqlEndpoint {
+                verb: "select",
+                id: "sparql-select",
+            },
+            SparqlEndpoint {
+                verb: "ask",
+                id: "sparql-ask",
+            },
+            SparqlEndpoint {
+                verb: "describe",
+                id: "sparql-describe",
+            },
+            SparqlEndpoint {
+                verb: "construct",
+                id: "sparql-construct",
+            },
+        ];
+        // describe().id and name() agree, and all four are distinct.
+        let ids: Vec<String> = endpoints.iter().map(|e| e.describe().id).collect();
+        for (e, id) in endpoints.iter().zip(&ids) {
+            assert_eq!(e.name(), id, "name() must match describe().id");
+        }
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "sparql form ids collide: {ids:?}");
+    }
+
+    #[test]
+    fn graph_and_as_are_optional_only_query_is_required() {
+        // Over MCP the required list becomes the inputSchema `required` — `graph` and `as`
+        // both have working defaults, so only `query` may be required (F5).
+        let desc = SparqlEndpoint {
+            verb: "select",
+            id: "sparql-select",
+        }
+        .describe();
+        let required: Vec<&str> = desc
+            .inputs
+            .iter()
+            .filter(|a| a.required)
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(
+            required,
+            vec!["query"],
+            "only query is required: {required:?}"
+        );
     }
 
     #[test]
