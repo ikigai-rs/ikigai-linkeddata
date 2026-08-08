@@ -23,6 +23,13 @@
 //! The result is `.cacheable()` and — because each graph is resolved with `inv.source` —
 //! depends on every source's golden thread, so it is cached and auto-invalidated when any
 //! source changes. Built on Oxigraph's in-memory store (no rocksdb); runs in the browser.
+//!
+//! **Shared-store variant**: [`space_with_store`] binds the same four IRIs over a
+//! caller-owned `Arc<`[`Store`]`>` — the seam that makes a host's live RDF (an explanation
+//! archive, annotation graphs) SPARQL-able as ONE shared graph. The caller owns the
+//! store's contents and lifecycle (nothing auto-loaded; [`load_vocabulary`] is the
+//! opt-in), `graph=` is not offered, and results are uncacheable (live data, no golden
+//! thread). [`space`]'s behavior is unchanged.
 
 #![forbid(unsafe_code)]
 
@@ -35,7 +42,15 @@ use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::{GraphName, NamedNodeRef};
 use oxigraph::sparql::results::{QueryResultsFormat, QueryResultsSerializer};
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
-use oxigraph::store::Store;
+use std::sync::Arc;
+
+// Re-exported so downstream hosts can name ONE canonical store type: the
+// `Arc<Store>` a host hands to `space_with_store` must be the *same* `Store` type
+// other modules (e.g. ikigai-browse's explanation archive) hold — Rust unifies
+// them only when everyone resolves the same oxigraph version. Depending on
+// `ikigai_sparql::Store` instead of a direct oxigraph dep makes that alignment
+// structural rather than coincidental.
+pub use oxigraph::store::Store;
 
 /// The four SPARQL verbs as resources. All four resolve identically — the query form
 /// (SELECT/ASK/CONSTRUCT/DESCRIBE) determines the result shape — but they're distinct,
@@ -43,18 +58,79 @@ use oxigraph::store::Store;
 /// catalog subjects and any id-keyed projection (an MCP tool name) don't collide.
 pub fn space() -> EndpointSpace {
     let mut space = EndpointSpace::new();
-    for (verb, id) in [
-        ("select", "sparql-select"),
-        ("ask", "sparql-ask"),
-        ("describe", "sparql-describe"),
-        ("construct", "sparql-construct"),
-    ] {
+    for (verb, id) in FORMS {
         space = space.bind(
             Exact::new(format!("urn:sparql:{verb}")),
-            SparqlEndpoint { verb, id },
+            SparqlEndpoint {
+                verb,
+                id,
+                shared: None,
+            },
         );
     }
     space
+}
+
+/// The four SPARQL verbs over a **shared, caller-owned store** — the seam that makes
+/// a host's live RDF (ikigai-browse's explanation archive, annotation graphs, …)
+/// SPARQL-able through `urn:sparql:*`: every module holding a clone of the same
+/// `Arc<Store>` and this space see ONE graph.
+///
+/// Contract (deliberately different from [`space`]):
+///
+/// - **The caller owns the store's contents and lifecycle.** Nothing is auto-loaded —
+///   not even the ikigai vocabulary (call [`load_vocabulary`] if schema joins are
+///   wanted). Writes happen through the raw handle (or other endpoints holding it),
+///   never through these read-only query endpoints.
+/// - **No `graph=` argument.** Loading kernel-resolved sources would mutate the shared
+///   store permanently; per-query federation is [`space`]'s job. Passing `graph=`
+///   is an error, and `describe()` doesn't offer it (the manifold must not over-offer).
+/// - **Results are uncacheable.** The store is live and written through a raw handle
+///   the kernel cannot see, so no golden thread covers it — a cached result could
+///   never be invalidated. (When a freshness watcher over the store exists, this can
+///   revisit; until then, don't cache.)
+///
+/// The query's default graph is the union of all graphs in the store, so triples in
+/// named graphs are visible to plain queries and `GRAPH <uri> { … }` still addresses
+/// one — the same semantics as [`space`].
+pub fn space_with_store(store: Arc<Store>) -> EndpointSpace {
+    let mut space = EndpointSpace::new();
+    for (verb, id) in FORMS {
+        space = space.bind(
+            Exact::new(format!("urn:sparql:{verb}")),
+            SparqlEndpoint {
+                verb,
+                id,
+                shared: Some(Arc::clone(&store)),
+            },
+        );
+    }
+    space
+}
+
+/// The four query forms and their UNIQUE description ids (see [`SparqlEndpoint`]).
+const FORMS: [(&str, &str); 4] = [
+    ("select", "sparql-select"),
+    ("ask", "sparql-ask"),
+    ("describe", "sparql-describe"),
+    ("construct", "sparql-construct"),
+];
+
+/// Load the bundled ikigai vocabulary (`ikigai_vocab::VOCABULARY`) into `store` as the
+/// named graph `urn:ikigai:vocab`. [`space`] does this automatically into its private
+/// per-query store; a shared store ([`space_with_store`]) gets NOTHING automatically —
+/// the caller owns its contents — so this is the explicit opt-in for hosts that want
+/// schema joins (`?e a/rdfs:subClassOf* ik:Endpoint`) over their shared graph.
+pub fn load_vocabulary(store: &Store) -> Result<()> {
+    let vocab_graph = NamedNodeRef::new(ikigai_vocab::VOCAB_IRI)
+        .map_err(|e| Error::Endpoint(format!("vocab graph name: {e}")))?;
+    store
+        .load_from_slice(
+            RdfParser::from_format(RdfFormat::Turtle).with_default_graph(vocab_graph),
+            ikigai_vocab::VOCABULARY.as_bytes(),
+        )
+        .map_err(|e| Error::Endpoint(format!("loading the ikigai vocabulary: {e}")))?;
+    Ok(())
 }
 
 /// A fresh in-memory store pre-seeded with the bundled ikigai vocabulary, loaded as the
@@ -65,14 +141,7 @@ pub fn space() -> EndpointSpace {
 /// graph — so `?e rdf:type/rdfs:subClassOf* ik:Endpoint` joins instances to this schema.
 fn store_with_vocabulary() -> Result<Store> {
     let store = Store::new().map_err(|e| Error::Endpoint(format!("store init: {e}")))?;
-    let vocab_graph = NamedNodeRef::new(ikigai_vocab::VOCAB_IRI)
-        .map_err(|e| Error::Endpoint(format!("vocab graph name: {e}")))?;
-    store
-        .load_from_slice(
-            RdfParser::from_format(RdfFormat::Turtle).with_default_graph(vocab_graph),
-            ikigai_vocab::VOCABULARY.as_bytes(),
-        )
-        .map_err(|e| Error::Endpoint(format!("loading the ikigai vocabulary: {e}")))?;
+    load_vocabulary(&store)?;
     Ok(store)
 }
 
@@ -84,6 +153,9 @@ fn store_with_vocabulary() -> Result<Store> {
 struct SparqlEndpoint {
     verb: &'static str,
     id: &'static str,
+    /// `Some` = the shared-store variant ([`space_with_store`]): query the given live
+    /// store, uncacheable, no `graph=`. `None` = the classic per-query dataset.
+    shared: Option<Arc<Store>>,
 }
 
 #[async_trait]
@@ -92,6 +164,27 @@ impl Endpoint for SparqlEndpoint {
         let query_str = inv.inline_str("query").map_err(|_| {
             Error::Endpoint("urn:sparql:* needs a `query=<sparql>` argument".to_string())
         })?;
+
+        // The shared-store variant: run the query over the caller-owned live store.
+        // Uncacheable — raw-handle writes carry no golden thread, so a cached result
+        // could never be invalidated (Expiry::Always is Representation's default).
+        if let Some(store) = &self.shared {
+            if inv.inline_str("graph").is_ok_and(|g| !g.trim().is_empty()) {
+                return Err(Error::Endpoint(
+                    "`graph=` is not supported over a shared store: loading sources would \
+                     mutate the caller-owned store. Write through its handle instead, or \
+                     mount ikigai_sparql::space() for per-query federation."
+                        .to_string(),
+                ));
+            }
+            let results = evaluate(query_str, store)?;
+            let (media, bytes) = serialize_results(results, inv.inline_str("as").ok())?;
+            return Ok(Representation::new(
+                ReprType::new(&media).with_param("charset", "utf-8"),
+                bytes,
+            ));
+        }
+
         // `graph=` is optional: the vocabulary graph (below) is always present, so a query
         // can run against it alone. Listed sources federate on top of it.
         let graph_list = inv.inline_str("graph").unwrap_or("");
@@ -119,17 +212,7 @@ impl Endpoint for SparqlEndpoint {
                 .map_err(|e| Error::Endpoint(format!("loading <{uri}>: {e}")))?;
         }
 
-        let mut prepared = SparqlEvaluator::new()
-            .parse_query(query_str)
-            .map_err(|e| Error::Endpoint(format!("SPARQL syntax error: {e}")))?;
-        // Default graph = the union of the loaded named graphs, so a query without an
-        // explicit GRAPH/FROM spans every source.
-        prepared.dataset_mut().set_default_graph_as_union();
-        let results = prepared
-            .on_store(&store)
-            .execute()
-            .map_err(|e| Error::Endpoint(format!("query evaluation error: {e}")))?;
-
+        let results = evaluate(query_str, &store)?;
         let (media, bytes) = serialize_results(results, inv.inline_str("as").ok())?;
         Ok(
             Representation::new(ReprType::new(&media).with_param("charset", "utf-8"), bytes)
@@ -142,17 +225,26 @@ impl Endpoint for SparqlEndpoint {
     }
 
     fn describe(&self) -> Description {
-        Description::new(self.id)
+        let desc = Description::new(self.id)
             .title(format!("SPARQL {}", self.verb.to_uppercase()))
-            .summary(
-                "Run a SPARQL query over one or more resolvable, cacheable graphs \
-                 (federation by listing graphs). The ikigai vocabulary (urn:ikigai:vocab) \
-                 is always loaded, so endpoint instances can join the class/property schema.",
-            )
             .verb(Verb::Source)
             .verb(Verb::Meta)
             .input(
                 ArgSpec::new("query").summary("the SPARQL query (SELECT/ASK/DESCRIBE/CONSTRUCT)"),
+            );
+        // The two variants offer DIFFERENT arguments: the shared-store form has no
+        // `graph=` (it would mutate the caller-owned store), and advertising it here
+        // would make the manifold over-offer.
+        let desc = if self.shared.is_some() {
+            desc.summary(
+                "Run a SPARQL query over the host's shared live RDF store (the graph other \
+                 modules write through the same store handle). Live data: uncacheable.",
+            )
+        } else {
+            desc.summary(
+                "Run a SPARQL query over one or more resolvable, cacheable graphs \
+                 (federation by listing graphs). The ikigai vocabulary (urn:ikigai:vocab) \
+                 is always loaded, so endpoint instances can join the class/property schema.",
             )
             .input(
                 ArgSpec::new("graph")
@@ -163,16 +255,17 @@ impl Endpoint for SparqlEndpoint {
                     )
                     .optional(),
             )
-            .input(
-                ArgSpec::new("as")
-                    .summary(
-                        "result representation: SELECT/ASK → application/sparql-results+json \
+        };
+        desc.input(
+            ArgSpec::new("as")
+                .summary(
+                    "result representation: SELECT/ASK → application/sparql-results+json \
                          (default), +xml, text/csv, text/tab-separated-values; \
                          CONSTRUCT/DESCRIBE → text/turtle (default), application/n-triples, …",
-                    )
-                    .optional(),
-            )
-            .output("application/sparql-results+json")
+                )
+                .optional(),
+        )
+        .output("application/sparql-results+json")
     }
 }
 
@@ -191,6 +284,20 @@ async fn resolve_graph(inv: &Invocation<'_>, uri: &str) -> Result<Representation
             Iri::parse(uri).map_err(|e| Error::Endpoint(format!("bad graph IRI `{uri}`: {e}")))?;
         inv.source(&iri).await
     }
+}
+
+/// Parse and run a query over `store` with the default graph set to the union of all
+/// its graphs — so a query without an explicit `GRAPH`/`FROM` spans every graph, and
+/// `GRAPH <uri> { … }` still addresses one. Both variants share these semantics.
+fn evaluate<'a>(query_str: &str, store: &'a Store) -> Result<QueryResults<'a>> {
+    let mut prepared = SparqlEvaluator::new()
+        .parse_query(query_str)
+        .map_err(|e| Error::Endpoint(format!("SPARQL syntax error: {e}")))?;
+    prepared.dataset_mut().set_default_graph_as_union();
+    prepared
+        .on_store(store)
+        .execute()
+        .map_err(|e| Error::Endpoint(format!("query evaluation error: {e}")))
 }
 
 /// Serialize query results by their kind, honoring the `as` representation.
@@ -321,9 +428,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let mut prepared = SparqlEvaluator::new().parse_query(query).unwrap();
-        prepared.dataset_mut().set_default_graph_as_union();
-        let results = prepared.on_store(&store).execute().unwrap();
+        let results = evaluate(query, &store).unwrap();
         let (media, bytes) = serialize_results(results, as_type).unwrap();
         (media, String::from_utf8(bytes).unwrap())
     }
@@ -333,24 +438,14 @@ mod tests {
     /// fixed). Guards against the single-constant id regressing back in.
     #[test]
     fn each_form_has_a_unique_id_and_name() {
-        let endpoints = [
-            SparqlEndpoint {
-                verb: "select",
-                id: "sparql-select",
-            },
-            SparqlEndpoint {
-                verb: "ask",
-                id: "sparql-ask",
-            },
-            SparqlEndpoint {
-                verb: "describe",
-                id: "sparql-describe",
-            },
-            SparqlEndpoint {
-                verb: "construct",
-                id: "sparql-construct",
-            },
-        ];
+        let endpoints: Vec<SparqlEndpoint> = FORMS
+            .iter()
+            .map(|(verb, id)| SparqlEndpoint {
+                verb,
+                id,
+                shared: None,
+            })
+            .collect();
         // describe().id and name() agree, and all four are distinct.
         let ids: Vec<String> = endpoints.iter().map(|e| e.describe().id).collect();
         for (e, id) in endpoints.iter().zip(&ids) {
@@ -369,6 +464,7 @@ mod tests {
         let desc = SparqlEndpoint {
             verb: "select",
             id: "sparql-select",
+            shared: None,
         }
         .describe();
         let required: Vec<&str> = desc
@@ -497,5 +593,165 @@ mod tests {
             html_producers.contains("rdf-transrept") && !html_producers.contains("toUpper"),
             "only the transreptor that produces text/html: {html_producers}"
         );
+    }
+
+    /// The shared-store seam (`space_with_store`): one caller-owned `Arc<Store>` written
+    /// through its raw handle, queried live through `urn:sparql:*`.
+    mod shared_store {
+        use super::super::*;
+        use futures::executor::block_on;
+        use ikigai_core::{ArgRef, Capability, Expiry, Kernel, Request};
+        use oxigraph::model::{GraphName, Literal, NamedNode, Quad};
+
+        fn name_quad(subject: &str, name: &str, graph: GraphName) -> Quad {
+            Quad::new(
+                NamedNode::new(subject).unwrap(),
+                NamedNode::new("http://ex/name").unwrap(),
+                Literal::new_simple_literal(name),
+                graph,
+            )
+        }
+
+        fn kernel_over(store: &Arc<Store>) -> Kernel {
+            Kernel::new(Arc::new(space_with_store(Arc::clone(store))))
+        }
+
+        fn issue(kernel: &Kernel, iri: &str, args: &[(&str, &str)]) -> Result<Representation> {
+            let mut request = Request::new(Verb::Source, Iri::parse(iri).unwrap());
+            for (k, v) in args {
+                request = request.with_arg(*k, ArgRef::Inline(v.as_bytes().to_vec()));
+            }
+            block_on(kernel.issue(request, &Capability::root()))
+        }
+
+        fn select_names(kernel: &Kernel) -> String {
+            let out = issue(
+                kernel,
+                "urn:sparql:select",
+                &[
+                    ("query", "SELECT ?name WHERE { ?s <http://ex/name> ?name }"),
+                    ("as", "text/csv"),
+                ],
+            )
+            .unwrap();
+            String::from_utf8(out.bytes).unwrap()
+        }
+
+        #[test]
+        fn raw_handle_writes_are_visible_through_the_endpoint() {
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+
+            // Live freshness, not a cache: the same query straddles the write.
+            assert!(!select_names(&kernel).contains("Ada"), "starts empty");
+            store
+                .insert(&name_quad("http://ex/a", "Ada", GraphName::DefaultGraph))
+                .unwrap();
+            assert!(select_names(&kernel).contains("Ada"), "write is visible");
+
+            // A named-graph write is visible too (union default graph)…
+            let annotations = NamedNode::new("urn:test:annotations").unwrap();
+            store
+                .insert(&name_quad("http://ex/b", "Bob", annotations.into()))
+                .unwrap();
+            let names = select_names(&kernel);
+            assert!(names.contains("Ada") && names.contains("Bob"), "{names}");
+
+            // …and the named graph stays individually addressable.
+            let out = issue(
+                &kernel,
+                "urn:sparql:select",
+                &[
+                    (
+                        "query",
+                        "SELECT ?name WHERE { GRAPH <urn:test:annotations> { ?s <http://ex/name> ?name } }",
+                    ),
+                    ("as", "text/csv"),
+                ],
+            )
+            .unwrap();
+            let only = String::from_utf8(out.bytes).unwrap();
+            assert!(only.contains("Bob") && !only.contains("Ada"), "{only}");
+        }
+
+        #[test]
+        fn two_spaces_over_one_arc_see_each_others_writes() {
+            // Two independent hosts (kernels) over ONE Arc: the store is shared state,
+            // not copied per space — a write lands in both views.
+            let store = Arc::new(Store::new().unwrap());
+            let (a, b) = (kernel_over(&store), kernel_over(&store));
+            store
+                .insert(&name_quad("http://ex/a", "Ada", GraphName::DefaultGraph))
+                .unwrap();
+            assert!(select_names(&a).contains("Ada"), "space A sees the write");
+            assert!(select_names(&b).contains("Ada"), "space B sees the write");
+        }
+
+        #[test]
+        fn results_over_a_live_store_are_uncacheable() {
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+            let out = issue(&kernel, "urn:sparql:ask", &[("query", "ASK { ?s ?p ?o }")]).unwrap();
+            // Raw-handle writes carry no golden thread, so a cached result could never
+            // be invalidated: the representation must stay Expiry::Always.
+            assert!(
+                matches!(out.expiry, Expiry::Always),
+                "live shared store must not cache: {:?}",
+                out.expiry
+            );
+        }
+
+        #[test]
+        fn graph_arg_is_rejected_and_not_offered() {
+            // Runtime: loading a source would mutate the caller-owned store.
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+            let err = issue(
+                &kernel,
+                "urn:sparql:select",
+                &[
+                    ("query", "SELECT * WHERE { ?s ?p ?o }"),
+                    ("graph", "http://ex/some.ttl"),
+                ],
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("shared store"),
+                "clear rejection: {err}"
+            );
+
+            // Manifold: the shared-store describe() must not offer `graph=` (over-offer).
+            let desc = SparqlEndpoint {
+                verb: "select",
+                id: "sparql-select",
+                shared: Some(Arc::clone(&store)),
+            }
+            .describe();
+            assert!(
+                !desc.inputs.iter().any(|a| a.name == "graph"),
+                "shared-store manifold must not offer graph="
+            );
+        }
+
+        #[test]
+        fn nothing_is_autoloaded_and_vocabulary_is_opt_in() {
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+            let schema_ask = &[(
+                "query",
+                "PREFIX ik: <https://ikigai-rs.dev/ns#> \
+                 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
+                 ASK { ik:Transreptor rdfs:subClassOf ik:Endpoint }",
+            )][..];
+
+            // The caller owns the store's contents: no vocabulary sneaks in.
+            let before = issue(&kernel, "urn:sparql:ask", schema_ask).unwrap();
+            assert!(String::from_utf8(before.bytes).unwrap().contains("false"));
+
+            // Opt-in via load_vocabulary, visible immediately (live store).
+            load_vocabulary(&store).unwrap();
+            let after = issue(&kernel, "urn:sparql:ask", schema_ask).unwrap();
+            assert!(String::from_utf8(after.bytes).unwrap().contains("true"));
+        }
     }
 }

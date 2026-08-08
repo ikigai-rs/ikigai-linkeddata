@@ -65,6 +65,36 @@ let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
 let kernel = Kernel::new(root);
 ```
 
+## Shared-store variant
+
+`space_with_store(store: Arc<ikigai_sparql::Store>)` binds the same four IRIs over a
+**caller-owned live store** — the seam that lets a host expose the RDF its other modules
+write (an explanation archive, annotation graphs) as one SPARQL-able shared graph. Use
+the re-exported `ikigai_sparql::Store` (= `oxigraph::store::Store`) so every module's
+`Arc<Store>` is the same type.
+
+```rust
+use ikigai_core::Kernel;
+use ikigai_sparql::{space_with_store, Store};
+use std::sync::Arc;
+
+let store = Arc::new(Store::new()?);           // the host hands clones of this Arc
+let kernel = Kernel::new(Arc::new(space_with_store(Arc::clone(&store))));
+// …other modules write through `store`; urn:sparql:* queries see it live.
+```
+
+The contract differs deliberately from `space()`:
+
+- **The caller owns the store's contents and lifecycle.** Nothing is auto-loaded — not
+  even the ikigai vocabulary; call `ikigai_sparql::load_vocabulary(&store)` if schema
+  joins are wanted.
+- **No `graph=` argument** (loading kernel-resolved sources would permanently mutate the
+  shared store — per-query federation remains `space()`'s job). Passing it is an error.
+- **Results are uncacheable**: writes go through the raw store handle, which carries no
+  golden thread, so a cached result could never be invalidated.
+- The query's default graph is the union of all graphs in the store (named graphs are
+  visible to plain queries; `GRAPH <uri> { … }` addresses one) — same as `space()`.
+
 ## Caching
 
 The result is `.cacheable()` and — because each graph is resolved with `inv.source` — it
