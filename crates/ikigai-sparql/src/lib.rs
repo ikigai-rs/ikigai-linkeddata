@@ -26,10 +26,14 @@
 //!
 //! **Shared-store variant**: [`space_with_store`] binds the same four IRIs over a
 //! caller-owned `Arc<`[`Store`]`>` — the seam that makes a host's live RDF (an explanation
-//! archive, annotation graphs) SPARQL-able as ONE shared graph. The caller owns the
-//! store's contents and lifecycle (nothing auto-loaded; [`load_vocabulary`] is the
-//! opt-in), `graph=` is not offered, and results are uncacheable (live data, no golden
-//! thread). [`space`]'s behavior is unchanged.
+//! archive, annotation graphs) SPARQL-able as ONE shared graph — **plus a fifth,
+//! `urn:sparql:update`**: a `Verb::Sink` that applies a SPARQL 1.1 UPDATE to that store
+//! in one transaction. It is the only writing verb in `urn:sparql:*`, and the first
+//! write to this crate's stores that goes THROUGH the kernel rather than around it (see
+//! [`UPDATE_THREAD`] for what that does and does not buy). The caller owns the store's
+//! contents and lifecycle (nothing auto-loaded; [`load_vocabulary`] is the opt-in),
+//! `graph=` is not offered, and results are uncacheable (live data, and still a
+//! partially-covered golden thread). [`space`]'s behavior is unchanged.
 
 #![forbid(unsafe_code)]
 
@@ -52,10 +56,17 @@ use std::sync::Arc;
 // structural rather than coincidental.
 pub use oxigraph::store::Store;
 
-/// The four SPARQL verbs as resources. All four resolve identically — the query form
-/// (SELECT/ASK/CONSTRUCT/DESCRIBE) determines the result shape — but they're distinct,
-/// discoverable IRIs, each carrying a UNIQUE description id (`sparql-{form}`) so their
-/// catalog subjects and any id-keyed projection (an MCP tool name) don't collide.
+/// The four SPARQL **query** verbs as resources. All four resolve identically — the query
+/// form (SELECT/ASK/CONSTRUCT/DESCRIBE) determines the result shape — but they're
+/// distinct, discoverable IRIs, each carrying a UNIQUE description id (`sparql-{form}`)
+/// so their catalog subjects and any id-keyed projection (an MCP tool name) don't collide.
+///
+/// **`urn:sparql:update` is deliberately NOT bound here** — only [`space_with_store`]
+/// binds it. This space builds a fresh dataset per query from the `graph=` list and drops
+/// it when the call returns, so an update against it would write into a store that is
+/// thrown away microseconds later: a silent no-op wearing the costume of a write. Leaving
+/// the IRI unbound turns that into an honest `Error::Unresolved` at the kernel, and keeps
+/// the action manifold from offering something that can never take effect.
 pub fn space() -> EndpointSpace {
     let mut space = EndpointSpace::new();
     for (verb, id) in FORMS {
@@ -71,28 +82,49 @@ pub fn space() -> EndpointSpace {
     space
 }
 
-/// The four SPARQL verbs over a **shared, caller-owned store** — the seam that makes
-/// a host's live RDF (ikigai-browse's explanation archive, annotation graphs, …)
-/// SPARQL-able through `urn:sparql:*`: every module holding a clone of the same
-/// `Arc<Store>` and this space see ONE graph.
+/// The four SPARQL query verbs **and `urn:sparql:update`** over a **shared,
+/// caller-owned store** — the seam that makes a host's live RDF (ikigai-browse's
+/// explanation archive, annotation graphs, …) SPARQL-able *and writable* through
+/// `urn:sparql:*`: every module holding a clone of the same `Arc<Store>` and this
+/// space see ONE graph.
 ///
 /// Contract (deliberately different from [`space`]):
 ///
 /// - **The caller owns the store's contents and lifecycle.** Nothing is auto-loaded —
 ///   not even the ikigai vocabulary (call [`load_vocabulary`] if schema joins are
 ///   wanted). Writes happen through the raw handle (or other endpoints holding it),
-///   never through these read-only query endpoints.
-/// - **No `graph=` argument.** Loading kernel-resolved sources would mutate the shared
-///   store permanently; per-query federation is [`space`]'s job. Passing `graph=`
-///   is an error, and `describe()` doesn't offer it (the manifold must not over-offer).
-/// - **Results are uncacheable.** The store is live and written through a raw handle
-///   the kernel cannot see, so no golden thread covers it — a cached result could
-///   never be invalidated. (When a freshness watcher over the store exists, this can
-///   revisit; until then, don't cache.)
-///
-/// The query's default graph is the union of all graphs in the store, so triples in
-/// named graphs are visible to plain queries and `GRAPH <uri> { … }` still addresses
-/// one — the same semantics as [`space`].
+///   or — new — through `urn:sparql:update`, the one writing verb in this crate.
+/// - **No `graph=` argument, on any of the five.** Loading kernel-resolved sources
+///   would mutate the shared store permanently; per-query federation is [`space`]'s
+///   job. Passing `graph=` is an error, and `describe()` doesn't offer it (the
+///   manifold must not over-offer).
+/// - **`urn:sparql:update` is capability-gated** on [`CAP_UPDATE`], and that scope is
+///   coarse on purpose — read its docs before handing it out; it includes `DROP ALL`.
+/// - **Query semantics differ from update semantics, by design.** A *query*'s default
+///   graph is the union of all graphs in the store, so triples in named graphs are
+///   visible to plain queries and `GRAPH <uri> { … }` still addresses one — the same
+///   as [`space`]. An *update* gets plain SPARQL 1.1 semantics: no union, so
+///   `DELETE WHERE { ?s ?p ?o }` touches the real default graph only and named graphs
+///   need an explicit `GRAPH ?g`. ⚠ That asymmetry is a trap worth knowing (SELECT
+///   sees a quad the twin DELETE will not remove), and it is still the right call:
+///   unioning an update's WHERE while its DELETE template writes to the real default
+///   graph would match everything and delete nothing, silently. See
+///   [`SparqlUpdateEndpoint`].
+/// - **Results are uncacheable — and `urn:sparql:update` does not yet change that.**
+///   This is the sentence that used to read "no golden thread covers it", and it is
+///   now false in its premise and true in its conclusion, so it is worth stating
+///   precisely. The kernel DOES cut a thread when an update is sunk through it (see
+///   [`UPDATE_THREAD`]) — that mechanism now exists and this crate tests it. What is
+///   still missing is *coverage*: the raw `Arc<Store>` handle remains a writer the
+///   kernel cannot see (ikigai-browse's annotate path is the live example), so a
+///   reader depending on that thread would be invalidated on kernel writes and NOT on
+///   raw ones. A thread that is right on some writes and wrong on others is worse
+///   than no thread at all — it converts "always fresh" into "fresh until someone
+///   writes the other way, then stale with no bound and no signal", which is exactly
+///   the stale-cache shape this ecosystem has already paid for twice. So reads stay
+///   `Expiry::Always`. The flip is one line the day every writer to a given store
+///   goes through the kernel, or a freshness watcher cuts [`UPDATE_THREAD`] on any
+///   change to it.
 pub fn space_with_store(store: Arc<Store>) -> EndpointSpace {
     let mut space = EndpointSpace::new();
     for (verb, id) in FORMS {
@@ -105,8 +137,88 @@ pub fn space_with_store(store: Arc<Store>) -> EndpointSpace {
             },
         );
     }
-    space
+    // The fifth IRI, bound ONLY here: an update needs somewhere durable to write, and
+    // only the shared store is durable (see [`space`]).
+    space.bind(
+        Exact::new("urn:sparql:update"),
+        SparqlUpdateEndpoint { store },
+    )
 }
+
+/// The capability `urn:sparql:update` requires — and the kernel enforces, because it is
+/// declared (`Description::requires` ⇒ `enforce_requires`, checked before `invoke` and
+/// before any cache lookup). The ablation is one line: delete the `.requires` from
+/// [`SparqlUpdateEndpoint::describe`] and `a_caller_without_the_capability_is_denied`
+/// fails.
+///
+/// ★ **One coarse scope, and it is the keys to the store.** Say so out loud rather than
+/// letting the omission say it: SPARQL UPDATE is not a family of small permissions.
+/// `DROP ALL`, `CLEAR ALL` and a bare `DELETE WHERE { ?s ?p ?o }` each empty the store,
+/// and `INSERT DATA` writes any triple into any graph. Holding this scope is therefore
+/// equivalent to holding write-everything-and-erase-everything on whatever store the
+/// host bound. The name is deliberately unqualified so nothing about it suggests
+/// otherwise.
+///
+/// A finer shape is designable — the parsed update exposes its operation list, so an
+/// endpoint could gate `DROP`/`CLEAR`/`LOAD` apart from `INSERT`, or hold a graph
+/// allow-list. It is **not** v1, for two reasons. A partial gate is theater: refusing
+/// `DROP ALL` while admitting `DELETE WHERE { ?s ?p ?o }` denies a spelling, not an act.
+/// And graph-level write policy belongs to the store's owner — the host that called
+/// [`space_with_store`] and chooses whether to bind this endpoint at all, under which
+/// IRI, and to whom it mints the scope. Coarse and honestly labelled beats fine and
+/// leaky. Revisit when a host actually needs to hand out a narrower write.
+pub const CAP_UPDATE: &str = "urn:cap:sparql:update";
+
+/// The golden thread a successful `urn:sparql:update` cuts.
+///
+/// # Does an update cut a thread, and which one?
+///
+/// **Yes, and it is this one — for free, with no extra code.** The kernel cuts the
+/// thread named after a mutating request's target on success, so sinking
+/// `urn:sparql:update` bumps the generation of the thread `"urn:sparql:update"`. Any
+/// cacheable representation that declared `depends_on(UPDATE_THREAD)` recomputes on its
+/// next read. `update_cuts_a_thread_a_cacheable_reader_can_depend_on` proves that end to
+/// end through a real kernel. This is the first write in this crate's history the kernel
+/// can see at all.
+///
+/// # Then why are this crate's own reads still uncacheable?
+///
+/// Because the cut is **correct but not complete**, and a partially-correct thread is
+/// worse than none:
+///
+/// - [`space_with_store`]'s store is caller-owned and, by its documented contract,
+///   written through the raw `Arc<Store>` handle by other modules — ikigai-browse's
+///   annotate path is the live example. Those writes never reach the kernel and cut
+///   nothing.
+/// - So `.cacheable().depends_on(UPDATE_THREAD)` on a SELECT would be invalidated by
+///   kernel writes and silently NOT by raw ones. A read would go from "always fresh" to
+///   "fresh until someone writes the other way, then stale forever" — an unbounded,
+///   signal-free wrong answer, where today's cost is only a recomputation.
+/// - Note what is *not* the objection: bluntness. A store-wide cut invalidating every
+///   derivation at once is coarse but honest, and would be perfectly acceptable. The
+///   objection is coverage, and coverage is not this crate's to fix — the raw writers
+///   live in other repos.
+///
+/// The flip is one line (`.cacheable().depends_on(UPDATE_THREAD)` in
+/// `SparqlEndpoint::invoke`'s shared-store arm) the day either holds: every writer to a
+/// given store goes through the kernel, or a freshness watcher over the store cuts this
+/// same thread on any change. Until then, don't cache.
+///
+/// # Why the thread is named after the endpoint
+///
+/// Because that is what the kernel's automatic cut uses — the request target's IRI. A
+/// state-naming thread (`urn:sparql:store`) would read better, but an endpoint cannot
+/// cut an arbitrary thread except by resolving `urn:kernel:cut`, which requires
+/// `urn:cap:kernel:cut` — a *system-wide* cache-invalidation authority, strictly broader
+/// than "write this one store", and one every updater would then have to hold. Paying
+/// that for a nicer name, on a cut nothing depends on yet, is a bad trade for v1.
+///
+/// ⚠ Two consequences of that choice, stated so they are not rediscovered: mount the
+/// endpoint at an alias and the cut is named after the alias, not this constant; and two
+/// distinct shared stores in one process share this one thread name, so a cut on either
+/// invalidates readers of both. Both are fixed by the same future work (an explicit,
+/// store-named cut) and neither bites while reads are uncacheable.
+pub const UPDATE_THREAD: &str = "urn:sparql:update";
 
 /// The four query forms and their UNIQUE description ids (see [`SparqlEndpoint`]).
 const FORMS: [(&str, &str); 4] = [
@@ -266,6 +378,149 @@ impl Endpoint for SparqlEndpoint {
                 .optional(),
         )
         .output("application/sparql-results+json")
+    }
+}
+
+/// `urn:sparql:update` — the one **writing** verb in `urn:sparql:*`, bound only by
+/// [`space_with_store`].
+///
+/// A `Verb::Sink` that applies a SPARQL 1.1 UPDATE (`INSERT DATA`, `DELETE … INSERT …
+/// WHERE`, `CLEAR`, `DROP`, …) to the caller-owned live store. Before this existed the
+/// ecosystem could query its graphs from anywhere and could only *change* them through
+/// bespoke Rust — which is why a namespace rename shipped as a one-shot binary
+/// (`ikigai-browse`'s `migrate-annotation-ns`); with this bound, that whole transform is
+/// one `DELETE … INSERT … WHERE`, and
+/// `the_browse_namespace_migration_is_now_one_query` in this crate's tests is that
+/// query, run against a store shaped like the real one.
+///
+/// Three things worth knowing, all of them tested:
+///
+/// - **Atomic.** Parse first, then run every operation of the update inside ONE
+///   transaction, committed only if all of them succeed. A `;`-separated update that
+///   fails halfway leaves the store exactly as it was — no partially-applied rename,
+///   which for a namespace move is the one outcome worse than not running.
+/// - **Plain SPARQL dataset semantics — deliberately NOT the query endpoints' union.**
+///   The default graph is the store's real default graph; named graphs need `GRAPH ?g`.
+///   Unioning the WHERE clause while the DELETE/INSERT templates still target the real
+///   default graph would produce an update that matches everything and writes nothing,
+///   silently. Better a documented asymmetry than a silent no-op. ⚠ So a SELECT can see
+///   a quad that the identically-worded DELETE will not remove.
+/// - **`graph=` is refused, not ignored.** Same reason as the query endpoints: this
+///   store is the caller's, and there is nothing per-query to write to.
+///
+/// ⚠ **`LOAD <url>` is not available**, and that is a capability property, not an
+/// oversight. It would need oxigraph's `http-client` feature, whose fetch is oxigraph's
+/// own — it never passes through `urn:httpGet`, so it is invisible to the kernel and
+/// ungated by `urn:cap:net:*`. Enabling it would silently upgrade [`CAP_UPDATE`] into
+/// "arbitrary outbound HTTP from inside the store", which is a much larger grant than
+/// the scope's name claims, and it would also drag a native TLS stack into a crate that
+/// must keep compiling to wasm32. `LOAD` fails with "HTTP client is not available"
+/// (cleanly, and — being an evaluation error — rolling the whole update back). The
+/// ikigai way to pull a remote graph in is to resolve it through the kernel, where the
+/// net capability applies: `urn:httpGet` on the query side, or a host that sources the
+/// document and sinks an `INSERT DATA` built from it.
+///
+/// The result is uncacheable (a Sink's result is never cached anyway) and the kernel
+/// cuts [`UPDATE_THREAD`] on success.
+struct SparqlUpdateEndpoint {
+    store: Arc<Store>,
+}
+
+#[async_trait]
+impl Endpoint for SparqlUpdateEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        // Refuse `graph=` loudly rather than ignoring it: a caller passing it has a
+        // per-query federation model in mind, and this endpoint has none to offer.
+        if inv.inline_str("graph").is_ok_and(|g| !g.trim().is_empty()) {
+            return Err(Error::Endpoint(
+                "`graph=` is not supported by urn:sparql:update: an update writes to the \
+                 caller-owned shared store, and a per-query dataset would be discarded when \
+                 the call returns. Drop `graph=`, or address a named graph from inside the \
+                 update with `GRAPH <uri> { … }`."
+                    .to_string(),
+            ));
+        }
+
+        // `update=` is the SPARQL 1.1 Protocol's name for update text (the siblings' arg
+        // is `query=`, and this is not a query); piped `content` is the pipeline form,
+        // which is also what the bare `sink urn:sparql:update <text>` REPL shape produces.
+        let update_str = inv
+            .inline_str("update")
+            .or_else(|_| inv.inline_str("content"))
+            .map_err(|_| {
+                Error::MissingArgument(
+                    "update (the SPARQL UPDATE text, or pipe it in as content)".to_string(),
+                )
+            })?;
+
+        let before = self
+            .store
+            .len()
+            .map_err(|e| Error::Endpoint(format!("store size: {e}")))?;
+
+        // Parse, then execute. `on_store` opens a transaction and `execute` commits it
+        // only after every operation succeeds — so a syntax error applies nothing, and a
+        // multi-operation update that fails halfway rolls the whole thing back.
+        let prepared = SparqlEvaluator::new()
+            .parse_update(update_str)
+            .map_err(|e| Error::Endpoint(format!("SPARQL UPDATE syntax error: {e}")))?;
+        prepared
+            .on_store(&self.store)
+            .execute()
+            .map_err(|e| Error::Endpoint(format!("update evaluation error: {e}")))?;
+
+        let after = self
+            .store
+            .len()
+            .map_err(|e| Error::Endpoint(format!("store size: {e}")))?;
+
+        // A stable, pinned one-line receipt (`update_reports_the_quad_delta_and_is
+        // _uncacheable`): the quad
+        // count before and after. Useful precisely where this endpoint replaces a
+        // migration script, whose whole reason for a dry run was "how much did I move?".
+        Ok(Representation::new(
+            ReprType::new("text/plain").with_param("charset", "utf-8"),
+            format!("updated: {before} -> {after} quads\n").into_bytes(),
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "sparql-update"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("sparql-update")
+            .title("SPARQL UPDATE")
+            .summary(
+                "Apply a SPARQL 1.1 UPDATE to the host's shared live RDF store, in one \
+                 transaction (all operations commit, or none do). The only writing verb in \
+                 urn:sparql:*. Plain SPARQL dataset semantics: the default graph is the \
+                 store's default graph, not the union the query endpoints use — address a \
+                 named graph with GRAPH <uri> { … }.",
+            )
+            .verb(Verb::Sink)
+            .verb(Verb::Meta)
+            // ★ Single-verb endpoint, so it authors flat: `Description::action_specs()`
+            // synthesizes the Sink ActionSpec and carries this `requires` into it, which
+            // is what `Kernel::issue` enforces before `invoke` ever runs. Declared here =
+            // enforced there; see CAP_UPDATE for why the scope is coarse and what it
+            // grants (short version: DROP ALL — this is the keys to the store).
+            .requires(CAP_UPDATE)
+            .input(
+                ArgSpec::new("update")
+                    .summary(
+                        "the SPARQL UPDATE text (INSERT DATA / DELETE … INSERT … WHERE / \
+                         CLEAR / DROP / …); falls back to piped `content` — one of the two \
+                         must be present",
+                    )
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("content")
+                    .summary("the SPARQL UPDATE text as piped content — the `… | urn:sparql:update` form")
+                    .optional(),
+            )
+            .output("text/plain;charset=utf-8")
     }
 }
 
@@ -752,6 +1007,601 @@ mod tests {
             load_vocabulary(&store).unwrap();
             let after = issue(&kernel, "urn:sparql:ask", schema_ask).unwrap();
             assert!(String::from_utf8(after.bytes).unwrap().contains("true"));
+        }
+    }
+
+    /// `urn:sparql:update` — the first write in this crate that goes THROUGH the kernel,
+    /// and the golden-thread question that forces (see [`UPDATE_THREAD`]).
+    mod update {
+        use super::super::*;
+        use futures::executor::block_on;
+        use ikigai_core::{ArgRef, Capability, Expiry, Kernel, Request};
+        use oxigraph::model::{GraphName, Literal, NamedNode, Quad};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const INSERT_ADA: &str = r#"INSERT DATA { <http://ex/a> <http://ex/name> "Ada" }"#;
+        const NAMES: &str = "SELECT ?n WHERE { ?s <http://ex/name> ?n }";
+
+        fn kernel_over(store: &Arc<Store>) -> Kernel {
+            Kernel::new(Arc::new(space_with_store(Arc::clone(store))))
+        }
+
+        fn issue_as(
+            kernel: &Kernel,
+            verb: Verb,
+            iri: &str,
+            args: &[(&str, &str)],
+            cap: &Capability,
+        ) -> Result<Representation> {
+            let mut request = Request::new(verb, Iri::parse(iri).unwrap());
+            for (k, v) in args {
+                request = request.with_arg(*k, ArgRef::Inline(v.as_bytes().to_vec()));
+            }
+            block_on(kernel.issue(request, cap))
+        }
+
+        /// Sink an update as root; return the receipt line.
+        fn update(kernel: &Kernel, text: &str) -> Result<String> {
+            issue_as(
+                kernel,
+                Verb::Sink,
+                "urn:sparql:update",
+                &[("update", text)],
+                &Capability::root(),
+            )
+            .map(|r| String::from_utf8(r.bytes).unwrap())
+        }
+
+        /// Read back THROUGH THE KERNEL — never the raw handle. That is the whole point
+        /// of `update_then_select_sees_the_change_through_the_kernel`.
+        fn select_csv(kernel: &Kernel, query: &str) -> String {
+            let out = issue_as(
+                kernel,
+                Verb::Source,
+                "urn:sparql:select",
+                &[("query", query), ("as", "text/csv")],
+                &Capability::root(),
+            )
+            .unwrap();
+            String::from_utf8(out.bytes).unwrap()
+        }
+
+        #[test]
+        fn update_then_select_sees_the_change_through_the_kernel() {
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+
+            assert!(!select_csv(&kernel, NAMES).contains("Ada"), "starts empty");
+            update(&kernel, INSERT_ADA).unwrap();
+            assert!(
+                select_csv(&kernel, NAMES).contains("Ada"),
+                "an INSERT sunk through the kernel is visible to a SELECT through the kernel"
+            );
+
+            // …and it round-trips: the delete is a kernel write too.
+            update(
+                &kernel,
+                "DELETE WHERE { <http://ex/a> <http://ex/name> ?n }",
+            )
+            .unwrap();
+            assert!(!select_csv(&kernel, NAMES).contains("Ada"), "DELETE lands");
+        }
+
+        #[test]
+        fn update_writes_into_a_named_graph_and_select_finds_it() {
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+            update(
+                &kernel,
+                r#"INSERT DATA { GRAPH <urn:test:g> { <http://ex/b> <http://ex/name> "Bob" } }"#,
+            )
+            .unwrap();
+            // The query endpoints union the default graph, so a plain SELECT sees it…
+            assert!(select_csv(&kernel, NAMES).contains("Bob"));
+            // …and it is still individually addressable.
+            let only = select_csv(
+                &kernel,
+                "SELECT ?n WHERE { GRAPH <urn:test:g> { ?s <http://ex/name> ?n } }",
+            );
+            assert!(only.contains("Bob"), "{only}");
+        }
+
+        /// ★ The gate — and it has been watched to fail, not assumed to work.
+        ///
+        /// Ablation performed 2026-09-04: delete `.requires(CAP_UPDATE)` from
+        /// `SparqlUpdateEndpoint::describe` and this test does not merely lose an error
+        /// string — the unauthorized `Capability::scoped(["urn:cap:sparql:query"])`
+        /// **succeeds**, returning `updated: 0 -> 1 quads`. An ungated write actually
+        /// lands. `the_sink_action_declares_the_scope_the_kernel_enforces` fails in the
+        /// same run, from the manifold's side.
+        ///
+        /// That is the shape of the enforcement: the declaration is the ONLY input to
+        /// `Kernel::issue`'s `enforce_requires`, which runs before `invoke` and before
+        /// the cache lookup. There is no second, redundant runtime check inside
+        /// `invoke` — deliberately, since the scope is coarse and unparameterized (an
+        /// ACL-style module like ikigai-fs keeps a finer runtime ceiling on top because
+        /// its policy depends on arguments; this one's does not). One consequence worth
+        /// stating: a host that invokes this endpoint OUTSIDE a kernel, via
+        /// `Invocation::detached`, gets no gate at all.
+        #[test]
+        fn a_caller_without_the_capability_is_denied_permanently() {
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+
+            let err = issue_as(
+                &kernel,
+                Verb::Sink,
+                "urn:sparql:update",
+                &[("update", INSERT_ADA)],
+                // A capability that can read but not write.
+                &Capability::scoped(["urn:cap:sparql:query"]),
+            )
+            .unwrap_err();
+
+            assert!(
+                matches!(err, Error::Denied(_)),
+                "a missing capability must be Denied, not a generic endpoint error: {err:?}"
+            );
+            assert!(
+                !err.is_transient(),
+                "a denial is PERMANENT — retrying the same request must never be advised"
+            );
+            assert!(
+                err.to_string().contains(CAP_UPDATE),
+                "the denial names the scope it wanted: {err}"
+            );
+            assert_eq!(
+                store.len().unwrap(),
+                0,
+                "a denied update must not have touched the store"
+            );
+
+            // The scope itself is sufficient — the gate refuses the caller, not everyone.
+            issue_as(
+                &kernel,
+                Verb::Sink,
+                "urn:sparql:update",
+                &[("update", INSERT_ADA)],
+                &Capability::scoped([CAP_UPDATE]),
+            )
+            .unwrap();
+            assert_eq!(store.len().unwrap(), 1, "the granted caller wrote");
+        }
+
+        /// Declared = enforced, from the manifold's side: the Sink action the catalog
+        /// projects must carry the same scope the kernel enforces. If these ever drift,
+        /// the manifold lies about what a capability can do.
+        #[test]
+        fn the_sink_action_declares_the_scope_the_kernel_enforces() {
+            let store = Arc::new(Store::new().unwrap());
+            let desc = SparqlUpdateEndpoint { store }.describe();
+            let sink: Vec<_> = desc
+                .action_specs()
+                .into_iter()
+                .filter(|a| a.verb == Verb::Sink)
+                .collect();
+            assert_eq!(sink.len(), 1, "exactly one Sink action");
+            assert_eq!(
+                sink[0].requires,
+                vec![CAP_UPDATE.to_string()],
+                "the projected action's requires IS the enforced floor"
+            );
+            assert_eq!(
+                desc.id, "sparql-update",
+                "distinct catalog subject / tool name"
+            );
+        }
+
+        #[test]
+        fn a_malformed_update_applies_nothing() {
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+
+            // A syntax error anywhere fails the whole text at parse time.
+            let err = update(&kernel, "INSERT DATA { <http://ex/a> <http://ex/name> ").unwrap_err();
+            assert!(err.to_string().contains("syntax error"), "{err}");
+            assert_eq!(store.len().unwrap(), 0, "nothing applied");
+
+            // …including when a VALID operation precedes the broken one, which is the
+            // case that actually matters: a half-applied rename is worse than none.
+            let err = update(
+                &kernel,
+                &format!("{INSERT_ADA} ; INSERT DATA {{ <http://ex/b> ??? }}"),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("syntax error"), "{err}");
+            assert_eq!(
+                store.len().unwrap(),
+                0,
+                "the leading valid operation must NOT have been applied"
+            );
+
+            // And a store that already holds data is left exactly as it was.
+            update(&kernel, INSERT_ADA).unwrap();
+            let before = store.len().unwrap();
+            assert!(update(&kernel, "DELETE WHERE { ?s ?p").is_err());
+            assert_eq!(
+                store.len().unwrap(),
+                before,
+                "unchanged after a failed update"
+            );
+        }
+
+        /// The harder half of "fails cleanly": an update whose operations all PARSE, and
+        /// which fails partway through EVALUATION. `LOAD` is the reachable trigger — this
+        /// build has oxigraph's `http-client` off on purpose (see [`SparqlUpdateEndpoint`])
+        /// — and it proves the transaction, not just the parser: the `INSERT DATA` that
+        /// already ran is rolled back, not committed.
+        #[test]
+        fn a_mid_update_failure_rolls_the_whole_transaction_back() {
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+            update(&kernel, INSERT_ADA).unwrap();
+
+            let err = update(
+                &kernel,
+                r#"INSERT DATA { <http://ex/b> <http://ex/name> "Bob" } ;
+                   LOAD <http://example.invalid/g>"#,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("evaluation error"), "{err}");
+            assert!(
+                !select_csv(&kernel, NAMES).contains("Bob"),
+                "the operation that SUCCEEDED before the failure must be rolled back"
+            );
+            assert!(
+                select_csv(&kernel, NAMES).contains("Ada"),
+                "and Ada survives"
+            );
+            assert_eq!(store.len().unwrap(), 1, "exactly the pre-update store");
+        }
+
+        #[test]
+        fn graph_is_refused_and_not_offered() {
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+
+            let err = issue_as(
+                &kernel,
+                Verb::Sink,
+                "urn:sparql:update",
+                &[("update", INSERT_ADA), ("graph", "http://ex/some.ttl")],
+                &Capability::root(),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("`graph=` is not supported"),
+                "a clean refusal, not a silent ignore: {err}"
+            );
+            assert_eq!(store.len().unwrap(), 0, "refused before writing");
+
+            // The manifold must not offer it either.
+            let desc = SparqlUpdateEndpoint {
+                store: Arc::clone(&store),
+            }
+            .describe();
+            assert!(
+                !desc.inputs.iter().any(|a| a.name == "graph"),
+                "urn:sparql:update must not advertise graph="
+            );
+        }
+
+        /// `space()` builds and drops a dataset per query, so an update against it would
+        /// be a silent no-op. It is unbound there instead — an honest resolution failure.
+        #[test]
+        fn the_per_query_space_does_not_bind_update() {
+            let kernel = Kernel::new(Arc::new(space()));
+            let err = issue_as(
+                &kernel,
+                Verb::Sink,
+                "urn:sparql:update",
+                &[("update", INSERT_ADA)],
+                &Capability::root(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, Error::Unresolved(_)),
+                "unbound, not a no-op write: {err:?}"
+            );
+        }
+
+        #[test]
+        fn the_update_text_can_arrive_as_piped_content() {
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+            issue_as(
+                &kernel,
+                Verb::Sink,
+                "urn:sparql:update",
+                &[("content", INSERT_ADA)],
+                &Capability::root(),
+            )
+            .unwrap();
+            assert!(select_csv(&kernel, NAMES).contains("Ada"));
+
+            // Neither argument at all is a MissingArgument, not a silent success.
+            let err = issue_as(
+                &kernel,
+                Verb::Sink,
+                "urn:sparql:update",
+                &[],
+                &Capability::root(),
+            )
+            .unwrap_err();
+            assert!(matches!(err, Error::MissingArgument(_)), "{err:?}");
+        }
+
+        /// The receipt line's shape, pinned: it leaves the process, so a test owns it
+        /// rather than the doc comment.
+        #[test]
+        fn update_reports_the_quad_delta_and_is_uncacheable() {
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+            assert_eq!(
+                update(&kernel, INSERT_ADA).unwrap(),
+                "updated: 0 -> 1 quads\n"
+            );
+            assert_eq!(
+                update(&kernel, "DELETE WHERE { ?s ?p ?o }").unwrap(),
+                "updated: 1 -> 0 quads\n"
+            );
+
+            let out = issue_as(
+                &kernel,
+                Verb::Sink,
+                "urn:sparql:update",
+                &[("update", INSERT_ADA)],
+                &Capability::root(),
+            )
+            .unwrap();
+            assert!(matches!(out.expiry, Expiry::Always), "{:?}", out.expiry);
+        }
+
+        /// ⚠ Query semantics union the graphs; update semantics do not. Documented on
+        /// [`SparqlUpdateEndpoint`], pinned here so the asymmetry cannot drift silently
+        /// into "SELECT and DELETE disagree and nobody wrote it down".
+        #[test]
+        fn update_uses_plain_dataset_semantics_not_the_query_union() {
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+            update(
+                &kernel,
+                r#"INSERT DATA { GRAPH <urn:test:g> { <http://ex/b> <http://ex/name> "Bob" } }"#,
+            )
+            .unwrap();
+
+            // SELECT sees it (union default graph)…
+            assert!(select_csv(&kernel, NAMES).contains("Bob"));
+            // …but the identically-worded DELETE does not touch it: the update's default
+            // graph is the store's real default graph.
+            update(&kernel, "DELETE WHERE { ?s ?p ?o }").unwrap();
+            assert!(
+                select_csv(&kernel, NAMES).contains("Bob"),
+                "a default-graph DELETE must not reach into named graphs"
+            );
+            // Naming the graph is how you reach it.
+            update(&kernel, "DELETE WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap();
+            assert!(!select_csv(&kernel, NAMES).contains("Bob"));
+        }
+
+        // --- the golden-thread question -------------------------------------------
+
+        /// A cacheable reader that declares [`UPDATE_THREAD`] — standing in for what a
+        /// shared-store SELECT would become the day every writer to a store goes through
+        /// the kernel. It counts its own invocations, so a cache hit is observable.
+        struct Probe(Arc<AtomicUsize>);
+
+        #[async_trait]
+        impl Endpoint for Probe {
+            async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+                let n = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+                Ok(
+                    Representation::new(ReprType::new("text/plain"), n.to_string().into_bytes())
+                        .cacheable()
+                        .depends_on(UPDATE_THREAD),
+                )
+            }
+            fn name(&self) -> &str {
+                "probe"
+            }
+            fn describe(&self) -> Description {
+                Description::new("probe").verb(Verb::Source)
+            }
+        }
+
+        /// ★★ The answer to "does an update cut a thread, and which one", executable.
+        ///
+        /// First half: it does. Sinking `urn:sparql:update` cuts [`UPDATE_THREAD`] (the
+        /// kernel's automatic cut of a mutating request's target), and a cacheable
+        /// reader that declared it recomputes. That mechanism did not exist in this
+        /// crate before — every write was raw.
+        ///
+        /// Second half, and the reason shared-store reads STAY uncacheable: a raw
+        /// `Arc<Store>` write cuts nothing, so the very same reader goes stale and
+        /// stays stale, with no signal. Coverage, not bluntness, is what is missing.
+        #[test]
+        fn update_cuts_a_thread_but_a_raw_handle_write_does_not() {
+            let store = Arc::new(Store::new().unwrap());
+            let hits = Arc::new(AtomicUsize::new(0));
+            let kernel = Kernel::new(Arc::new(
+                space_with_store(Arc::clone(&store))
+                    .bind(Exact::new("urn:test:probe"), Probe(Arc::clone(&hits))),
+            ));
+            let read = |k: &Kernel| {
+                let out =
+                    issue_as(k, Verb::Source, "urn:test:probe", &[], &Capability::root()).unwrap();
+                String::from_utf8(out.bytes).unwrap()
+            };
+
+            assert_eq!(read(&kernel), "1", "first read computes");
+            assert_eq!(read(&kernel), "1", "second read is a cache hit");
+
+            // A kernel write cuts the thread: the reader recomputes.
+            update(&kernel, INSERT_ADA).unwrap();
+            assert_eq!(
+                read(&kernel),
+                "2",
+                "urn:sparql:update cut UPDATE_THREAD and the cached reader was invalidated"
+            );
+            assert_eq!(read(&kernel), "2", "and it re-cached");
+
+            // A RAW write does not. This is the whole argument for keeping shared-store
+            // reads uncacheable: the thread would be right here and wrong there.
+            store
+                .insert(&Quad::new(
+                    NamedNode::new("http://ex/b").unwrap(),
+                    NamedNode::new("http://ex/name").unwrap(),
+                    Literal::new_simple_literal("Bob"),
+                    GraphName::DefaultGraph,
+                ))
+                .unwrap();
+            assert_eq!(
+                read(&kernel),
+                "2",
+                "a raw-handle write cuts nothing — a reader depending on this thread \
+                 would now be serving a stale answer with no bound and no signal"
+            );
+        }
+
+        /// The shared-store query endpoints must NOT have quietly become cacheable on the
+        /// strength of the cut above. This is the decision itself, machine-checked.
+        #[test]
+        fn shared_store_reads_stay_uncacheable_despite_the_cut() {
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+            let out = issue_as(
+                &kernel,
+                Verb::Source,
+                "urn:sparql:ask",
+                &[("query", "ASK { ?s ?p ?o }")],
+                &Capability::root(),
+            )
+            .unwrap();
+            assert!(
+                matches!(out.expiry, Expiry::Always),
+                "raw-handle writers still bypass the kernel: see UPDATE_THREAD. {:?}",
+                out.expiry
+            );
+        }
+
+        // --- the acceptance test --------------------------------------------------
+
+        /// ★ The reason this endpoint exists.
+        ///
+        /// `ikigai-browse`'s `migrate-annotation-ns` is a one-shot BINARY whose own module
+        /// doc says: "when `urn:sparql:update` exists this is one `DELETE … INSERT …
+        /// WHERE` against a bound store, and this file should be deleted rather than
+        /// generalized." This is that query, run through the kernel over a store shaped
+        /// like the real one — including the three things that make the rewrite awkward:
+        /// IRIs move in EVERY position (subject, predicate, object and graph name), a
+        /// LITERAL that merely quotes the old prefix must NOT move, and the whole thing
+        /// must be atomic.
+        #[test]
+        fn the_browse_namespace_migration_is_now_one_query() {
+            const OLD: &str = "urn:annotation:";
+            const NEW: &str = "urn:iki:annotation:";
+
+            let store = Arc::new(Store::new().unwrap());
+            let kernel = kernel_over(&store);
+
+            // A browse-shaped store: an annotation, its selector (object position), an
+            // incoming prov:generated reference (object position, subject does NOT move),
+            // a quad living in a graph NAMED under the old prefix, and — the trap — an
+            // oa:exact literal that quotes a line of source mentioning the old prefix.
+            update(
+                &kernel,
+                r#"
+                PREFIX oa: <http://www.w3.org/ns/oa#>
+                PREFIX prov: <http://www.w3.org/ns/prov#>
+                INSERT DATA {
+                    <urn:annotation:m0> a oa:Annotation ;
+                        oa:hasSelector <urn:annotation:m0:sel> ;
+                        oa:exact "const OLD_PREFIX: &str = \"urn:annotation:\";" .
+                    <urn:review:r0> prov:generated <urn:annotation:m0> .
+                    GRAPH <urn:annotation:graph> { <urn:annotation:m1> a oa:Annotation }
+                }"#,
+            )
+            .unwrap();
+            let total = store.len().unwrap();
+
+            // ONE update, two operations (default graph, then named graphs), one
+            // transaction. `isIRI` is the guard that leaves the literal alone.
+            let mv = |v: &str| {
+                format!(
+                    "IF(isIRI(?{v}) && STRSTARTS(STR(?{v}), \"{OLD}\"), \
+                     IRI(CONCAT(\"{NEW}\", STRAFTER(STR(?{v}), \"{OLD}\"))), ?{v})"
+                )
+            };
+            let migration = format!(
+                "DELETE {{ ?s ?p ?o }} INSERT {{ ?s2 ?p2 ?o2 }} WHERE {{
+                     ?s ?p ?o .
+                     BIND({s} AS ?s2) BIND({p} AS ?p2) BIND({o} AS ?o2)
+                     FILTER(!sameTerm(?s, ?s2) || !sameTerm(?p, ?p2) || !sameTerm(?o, ?o2))
+                 }} ;
+                 DELETE {{ GRAPH ?g {{ ?s ?p ?o }} }} INSERT {{ GRAPH ?g2 {{ ?s2 ?p2 ?o2 }} }} WHERE {{
+                     GRAPH ?g {{ ?s ?p ?o }}
+                     BIND({s} AS ?s2) BIND({p} AS ?p2) BIND({o} AS ?o2) BIND({g} AS ?g2)
+                     FILTER(!sameTerm(?s, ?s2) || !sameTerm(?p, ?p2)
+                            || !sameTerm(?o, ?o2) || !sameTerm(?g, ?g2))
+                 }}",
+                s = mv("s"),
+                p = mv("p"),
+                o = mv("o"),
+                g = mv("g"),
+            );
+            update(&kernel, &migration).unwrap();
+
+            // Nothing under the old prefix survives in an IRI position…
+            let leftover = select_csv(
+                &kernel,
+                &format!(
+                    "SELECT ?s WHERE {{ {{ ?s ?p ?o }} UNION {{ GRAPH ?g {{ ?s ?p ?o }} }} \
+                     FILTER(STRSTARTS(STR(?s), \"{OLD}\") || STRSTARTS(STR(?p), \"{OLD}\") \
+                     || (isIRI(?o) && STRSTARTS(STR(?o), \"{OLD}\"))) }}"
+                ),
+            );
+            assert_eq!(
+                leftover.lines().count(),
+                1,
+                "header only — no IRI left under the old prefix: {leftover}"
+            );
+
+            // …the annotation, its selector and the incoming reference all moved together…
+            for expected in [
+                "urn:iki:annotation:m0",
+                "urn:iki:annotation:m0:sel",
+                "urn:iki:annotation:m1",
+            ] {
+                let found = select_csv(
+                    &kernel,
+                    &format!(
+                        "SELECT ?p WHERE {{ {{ <{expected}> ?p ?o }} UNION \
+                         {{ GRAPH ?g {{ <{expected}> ?p ?o }} }} UNION \
+                         {{ ?x ?p <{expected}> }} }}"
+                    ),
+                );
+                assert!(found.lines().count() > 1, "{expected} is missing: {found}");
+            }
+
+            // …the graph NAME moved too…
+            let named = select_csv(
+                &kernel,
+                "SELECT ?s WHERE { GRAPH <urn:iki:annotation:graph> { ?s ?p ?o } }",
+            );
+            assert!(named.contains("urn:iki:annotation:m1"), "{named}");
+
+            // …the literal that merely QUOTES the old prefix did not move…
+            let quoted = select_csv(
+                &kernel,
+                "PREFIX oa: <http://www.w3.org/ns/oa#> SELECT ?e WHERE { ?a oa:exact ?e }",
+            );
+            assert!(
+                quoted.contains("urn:annotation:"),
+                "the quoted source text is data, not an identifier: {quoted}"
+            );
+
+            // …and nothing was gained or lost on the way.
+            assert_eq!(store.len().unwrap(), total, "quad count preserved");
         }
     }
 }
