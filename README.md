@@ -17,7 +17,7 @@ to render the constructed graph as an HTML table.
 | Crate | What it does |
 | --- | --- |
 | [`ikigai-rdf`](https://crates.io/crates/ikigai-rdf) | RDF **transreption** — `urn:rdf:transrept` re-serializes an RDF graph between syntaxes (Turtle, N-Triples, N-Quads, TriG, RDF/XML, JSON-LD) or renders it as an HTML table. Input syntax is sniffed. |
-| [`ikigai-sparql`](https://crates.io/crates/ikigai-sparql) | **SPARQL** over resolvable graphs — `urn:sparql:{select,ask,construct,describe}` resolve `graph=` sources through the kernel (cacheable, golden-thread-invalidated), run `query=`, and serialize the results. |
+| [`ikigai-sparql`](https://crates.io/crates/ikigai-sparql) | **SPARQL** over resolvable graphs — `urn:sparql:{select,ask,construct,describe}` resolve `graph=` sources through the kernel (cacheable, golden-thread-invalidated), run `query=`, and serialize the results. Over a host's shared live store, `urn:sparql:update` adds the one **writing** verb: a transactional SPARQL 1.1 UPDATE, capability-gated on `urn:cap:sparql:update`. |
 
 See each crate's README for its endpoints, arguments, and serialization options.
 

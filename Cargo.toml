@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]
@@ -11,7 +11,12 @@ repository = "https://github.com/ikigai-rs/ikigai-linkeddata"
 homepage = "https://github.com/ikigai-rs/ikigai-linkeddata"
 
 [workspace.dependencies]
-ikigai-core = "0.1.35" # ArgSpec one_of/default
+# 0.1.50 is the TRUE minimum, not a comfort pin: ikigai-sparql's update endpoint is
+# gated purely by its DECLARED `requires`, and `Kernel::issue`'s `enforce_requires`
+# (declared = enforced, before invoke and before the cache lookup) is what turns that
+# declaration into a gate. Against an older core the endpoint would parse, describe
+# and publish its capability — and admit every caller. Verified present in 0.1.50.
+ikigai-core = "0.1.50" # enforce_requires (declared = enforced); ArgSpec one_of/default
 # The ikigai vocabulary (ns# ontology + Description→Turtle). ikigai-sparql bundles its
 # schema graph so endpoint instances can be joined against the class/property defs.
 ikigai-vocab = "0.1.22"
