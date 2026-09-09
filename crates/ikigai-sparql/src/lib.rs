@@ -109,7 +109,7 @@ pub fn space() -> EndpointSpace {
 ///   sees a quad the twin DELETE will not remove), and it is still the right call:
 ///   unioning an update's WHERE while its DELETE template writes to the real default
 ///   graph would match everything and delete nothing, silently. See
-///   [`SparqlUpdateEndpoint`].
+///   the private `SparqlUpdateEndpoint`.
 /// - **Results are uncacheable — and `urn:sparql:update` does not yet change that.**
 ///   This is the sentence that used to read "no golden thread covers it", and it is
 ///   now false in its premise and true in its conclusion, so it is worth stating
@@ -148,7 +148,7 @@ pub fn space_with_store(store: Arc<Store>) -> EndpointSpace {
 /// The capability `urn:sparql:update` requires — and the kernel enforces, because it is
 /// declared (`Description::requires` ⇒ `enforce_requires`, checked before `invoke` and
 /// before any cache lookup). The ablation is one line: delete the `.requires` from
-/// [`SparqlUpdateEndpoint::describe`] and `a_caller_without_the_capability_is_denied`
+/// the private `SparqlUpdateEndpoint::describe` and `a_caller_without_the_capability_is_denied`
 /// fails.
 ///
 /// ★ **One coarse scope, and it is the keys to the store.** Say so out loud rather than
