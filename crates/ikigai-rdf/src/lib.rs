@@ -28,6 +28,9 @@ use oxrdfio::{RdfFormat, RdfParser, RdfSerializer};
 /// The `rdfs:subClassOf` IRI.
 const SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 
+/// The `rdf:type` IRI — the one predicate JSON-LD spells as a keyword (`@type`).
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+
 /// Parse a Turtle alignment graph and return every `rdfs:subClassOf` axiom as a
 /// `(subclass, superclass)` IRI pair — the closure pairs a host feeds to the kernel's
 /// type-aware action selection (`Kernel::with_subclass_axioms`), so an entity typed
@@ -320,7 +323,147 @@ fn transrept_bytes(input: &[u8], as_type: &str) -> Result<(String, Vec<u8>)> {
     serializer
         .finish()
         .map_err(|e| Error::Endpoint(format!("RDF serialize error: {e}")))?;
+    let out = if matches!(to, RdfFormat::JsonLd { .. }) {
+        promote_rdf_type(&out)
+    } else {
+        out
+    };
     Ok((media_base(as_type).to_string(), out))
+}
+
+/// Rewrite the serializer's `rdf:type` property into JSON-LD `@type`.
+///
+/// oxjsonld (0.2.x) emits EVERY predicate as a property key, `rdf:type` included — its
+/// `from_rdf.rs` carries a `// TODO: use @type` — so a typed subject came out as
+/// `"http://www.w3.org/1999/02/22-rdf-syntax-ns#type":[{"@id":"…Person"}]`. That is
+/// well-formed expanded JSON-LD, but it is not what the JSON-LD 1.1 *Serialize RDF as
+/// JSON-LD* algorithm produces (an IRI or blank-node object of `rdf:type` goes to `@type`
+/// unless `useRdfType` is set), and a downstream `urn:jsonld:compact` cannot recover
+/// `"@type": "foaf:Person"` from it — consumers get the full-IRI key instead. This pass
+/// promotes each such property to `"@type":["…Person"]`: IRI and blank-node values only;
+/// a literal-valued `rdf:type` (generalized RDF) stays under the property, exactly as
+/// the algorithm leaves it. Every other byte is copied through unchanged — the scan
+/// tracks JSON string state, so a literal that merely CONTAINS the `rdf:type` IRI is
+/// never touched, and an untyped document comes back byte-identical.
+fn promote_rdf_type(json: &[u8]) -> Vec<u8> {
+    let needle = format!("\"{RDF_TYPE}\":[");
+    let needle = needle.as_bytes();
+    let mut out = Vec::with_capacity(json.len());
+    let mut i = 0;
+    while i < json.len() {
+        if json[i] != b'"' {
+            out.push(json[i]);
+            i += 1;
+            continue;
+        }
+        if json[i..].starts_with(needle) {
+            if let Some((rewritten, consumed)) = rewrite_type_array(&json[i + needle.len()..]) {
+                out.extend_from_slice(&rewritten);
+                i += needle.len() + consumed;
+                continue;
+            }
+        }
+        // Any other string literal (key or value) is copied verbatim, escapes included.
+        let end = string_end(json, i);
+        out.extend_from_slice(&json[i..end]);
+        i = end;
+    }
+    out
+}
+
+/// `rest` starts just after `"<rdf:type>":[`. Parse the array's elements up to and
+/// including the closing `]`; return the replacement for the whole key/value pair and
+/// the number of bytes consumed. `None` when the array is not the shape the serializer
+/// emits, or holds nothing to promote — the caller then copies the original through.
+fn rewrite_type_array(rest: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let mut ids: Vec<&[u8]> = Vec::new(); // the quoted IRI / bnode strings, verbatim
+    let mut others: Vec<&[u8]> = Vec::new(); // elements that are not a bare `{"@id":…}`
+    let mut i = 0;
+    loop {
+        match rest.get(i)? {
+            b']' => {
+                i += 1;
+                break;
+            }
+            b',' => i += 1,
+            b'{' => {
+                let end = object_end(rest, i)?;
+                let element = &rest[i..end];
+                match id_reference(element) {
+                    Some(id) => ids.push(id),
+                    None => others.push(element),
+                }
+                i = end;
+            }
+            _ => return None,
+        }
+    }
+    if ids.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(b"\"@type\":[");
+    out.extend_from_slice(&ids.join(&b","[..]));
+    out.push(b']');
+    if !others.is_empty() {
+        out.extend_from_slice(b",\"");
+        out.extend_from_slice(RDF_TYPE.as_bytes());
+        out.extend_from_slice(b"\":[");
+        out.extend_from_slice(&others.join(&b","[..]));
+        out.push(b']');
+    }
+    Some((out, i))
+}
+
+/// Is `element` exactly `{"@id":"…"}` — a node reference and nothing else? Returns the
+/// quoted identifier, escapes intact.
+fn id_reference(element: &[u8]) -> Option<&[u8]> {
+    const PREFIX: &[u8] = b"{\"@id\":\"";
+    if !element.starts_with(PREFIX) {
+        return None;
+    }
+    let start = PREFIX.len() - 1; // the opening quote of the identifier
+    let end = string_end(element, start);
+    (element.get(end) == Some(&b'}') && end + 1 == element.len()).then(|| &element[start..end])
+}
+
+/// `json[start]` is an opening `"`; return the index just past the closing `"`,
+/// honoring backslash escapes. An unterminated string runs to the end of the input.
+fn string_end(json: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < json.len() {
+        match json[i] {
+            b'\\' => i += 2,
+            b'"' => return i + 1,
+            _ => i += 1,
+        }
+    }
+    json.len()
+}
+
+/// `json[start]` is an opening `{`; return the index just past its matching `}`,
+/// skipping over string literals. `None` if the object never closes.
+fn object_end(json: &[u8], start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < json.len() {
+        match json[i] {
+            b'"' => i = string_end(json, i),
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// Sniff the input syntax from its opening token: `{`/`[` ⇒ JSON-LD; a leading `<…>`
@@ -559,6 +702,94 @@ foaf:Person foaf:name "ignored" ."#;
                 "round-trip via {via} lost data"
             );
         }
+    }
+
+    const TTL_TYPED: &str = r#"@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+<http://example.org/me> a foaf:Person, foaf:Agent ; foaf:name "Ada" ."#;
+
+    #[test]
+    fn typed_subject_serializes_as_jsonld_type() {
+        // The JSON-LD 1.1 shape: rdf:type becomes the @type keyword with IRI values,
+        // never a property keyed by the rdf:type IRI. Both types land in one array, in
+        // the order the triples arrived.
+        let jsonld = body(TTL_TYPED, "application/ld+json");
+        assert!(
+            jsonld.contains(
+                "\"@type\":[\"http://xmlns.com/foaf/0.1/Person\",\"http://xmlns.com/foaf/0.1/Agent\"]"
+            ),
+            "{jsonld}"
+        );
+        assert!(
+            !jsonld.contains(RDF_TYPE),
+            "rdf:type must not survive as a property key: {jsonld}"
+        );
+        // And the type triples are still there when the JSON-LD is read back.
+        let canonical = body(TTL_TYPED, "application/n-triples");
+        let back = body(&jsonld, "application/n-triples");
+        let set = |s: &str| {
+            let mut v: Vec<String> = s
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(str::to_string)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(set(&canonical), set(&back), "@type round-trips to rdf:type");
+        assert_eq!(set(&back).len(), 3);
+    }
+
+    #[test]
+    fn jsonld_type_compacts_to_a_prefixed_type() {
+        // The consumer-facing check: urn:jsonld:compact against a context that only
+        // declares the foaf prefix yields "@type": "foaf:Person" — the shape the edge
+        // FOAF face had to fake with a `type` term in its context before this fix.
+        use ikigai_core::ArgRef;
+        let jsonld = body(
+            r#"@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+<http://example.org/me> a foaf:Person ; foaf:name "Ada" ."#,
+            "application/ld+json",
+        );
+        let kernel = Kernel::new(Arc::new(ikigai_jsonld::space()));
+        let request = Request::new(Verb::Source, Iri::parse("urn:jsonld:compact").unwrap())
+            .with_arg("content", ArgRef::Inline(jsonld.into_bytes()))
+            .with_arg(
+                "context",
+                ArgRef::Inline(br#"{"@context":{"foaf":"http://xmlns.com/foaf/0.1/"}}"#.to_vec()),
+            );
+        let out = block_on(kernel.issue(request, &Capability::root())).unwrap();
+        let compact = String::from_utf8(out.bytes).unwrap();
+        let dense: String = compact.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            dense.contains("\"@type\":\"foaf:Person\""),
+            "compaction should yield a prefixed @type: {compact}"
+        );
+        assert!(!compact.contains(RDF_TYPE), "{compact}");
+    }
+
+    #[test]
+    fn promote_rdf_type_leaves_everything_else_byte_identical() {
+        // An untyped document: unchanged, even when a literal VALUE spells out the
+        // rdf:type key shape — the scanner never rewrites inside a string.
+        let untyped =
+            format!(r#"[{{"@id":"urn:s","urn:p":[{{"@value":""{RDF_TYPE}":[{{"@id":"x"}}]"}}]}}]"#);
+        assert_eq!(promote_rdf_type(untyped.as_bytes()), untyped.as_bytes());
+        // A typed one: only the rdf:type pair changes; the rest is copied through.
+        let typed = format!(
+            r#"[{{"@id":"urn:s","{RDF_TYPE}":[{{"@id":"urn:C"}},{{"@id":"_:b0"}}],"urn:p":[{{"@value":"v"}}]}}]"#
+        );
+        assert_eq!(
+            String::from_utf8(promote_rdf_type(typed.as_bytes())).unwrap(),
+            r#"[{"@id":"urn:s","@type":["urn:C","_:b0"],"urn:p":[{"@value":"v"}]}]"#
+        );
+        // Generalized RDF: a literal object of rdf:type is not a type — it stays under
+        // the property, after the promoted IRIs, as the from-RDF algorithm leaves it.
+        let mixed =
+            format!(r#"[{{"@id":"urn:s","{RDF_TYPE}":[{{"@id":"urn:C"}},{{"@value":"lit"}}]}}]"#);
+        assert_eq!(
+            String::from_utf8(promote_rdf_type(mixed.as_bytes())).unwrap(),
+            format!(r#"[{{"@id":"urn:s","@type":["urn:C"],"{RDF_TYPE}":[{{"@value":"lit"}}]}}]"#)
+        );
     }
 
     #[test]

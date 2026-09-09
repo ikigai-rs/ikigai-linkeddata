@@ -23,3 +23,6 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 futures = "0.3"
+# The consumer-side witness for the JSON-LD `@type` shape: a test compacts
+# urn:rdf:transrept's output through urn:jsonld:compact and expects a prefixed type.
+ikigai-jsonld = "0.1.1"
