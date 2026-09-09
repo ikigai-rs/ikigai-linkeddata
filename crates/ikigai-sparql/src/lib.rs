@@ -291,10 +291,7 @@ impl Endpoint for SparqlEndpoint {
             }
             let results = evaluate(query_str, store)?;
             let (media, bytes) = serialize_results(results, inv.inline_str("as").ok())?;
-            return Ok(Representation::new(
-                ReprType::new(&media).with_param("charset", "utf-8"),
-                bytes,
-            ));
+            return Ok(Representation::new(result_repr_type(&media), bytes));
         }
 
         // `graph=` is optional: the vocabulary graph (below) is always present, so a query
@@ -326,10 +323,7 @@ impl Endpoint for SparqlEndpoint {
 
         let results = evaluate(query_str, &store)?;
         let (media, bytes) = serialize_results(results, inv.inline_str("as").ok())?;
-        Ok(
-            Representation::new(ReprType::new(&media).with_param("charset", "utf-8"), bytes)
-                .cacheable(),
-        )
+        Ok(Representation::new(result_repr_type(&media), bytes).cacheable())
     }
 
     fn name(&self) -> &str {
@@ -368,7 +362,7 @@ impl Endpoint for SparqlEndpoint {
                     .optional(),
             )
         };
-        desc.input(
+        let desc = desc.input(
             ArgSpec::new("as")
                 .summary(
                     "result representation: SELECT/ASK → application/sparql-results+json \
@@ -376,8 +370,16 @@ impl Endpoint for SparqlEndpoint {
                          CONSTRUCT/DESCRIBE → text/turtle (default), application/n-triples, …",
                 )
                 .optional(),
-        )
-        .output("application/sparql-results+json")
+        );
+        // Declared outputs = the faces `as=` can produce for THIS form, each in the same
+        // canonical string the representation carries (`type;charset=utf-8`, default
+        // first). `want=` selection compares a declared output to the wanted string
+        // literally, so a declaration that omits the charset — or lists only the
+        // default — never matches the representations this endpoint actually returns.
+        // `declared_outputs_are_the_produced_canonical_forms` runs every one of them.
+        output_faces(self.verb)
+            .iter()
+            .fold(desc, |desc, face| desc.output(*face))
     }
 }
 
@@ -638,6 +640,51 @@ fn media_base(media: &str) -> &str {
     media.split(';').next().unwrap_or(media).trim()
 }
 
+/// The [`ReprType`] of a serialized result, from the media string oxigraph reports.
+///
+/// Those strings can carry parameters INLINE — `QueryResultsFormat::Csv`/`Tsv` report
+/// `text/csv; charset=utf-8`, and a JSON-LD profile rides the same way — while a
+/// `ReprType` keys `canonical()`, `want=` selection and the transreptor router on its
+/// bare `media_type`. So the string is parsed, never stored: the base type becomes
+/// `media_type`, each `k=v` a param, and `charset=utf-8` is asserted the way every
+/// other endpoint does (every face here is UTF-8; `with_param` replaces, so a charset
+/// that was inline does not double up). Through 0.1.7 the string went in verbatim and
+/// the CSV face canonicalized as `text/csv; charset=utf-8;charset=utf-8` — a type that
+/// matched nothing, its own declared output included.
+/// `repr_types_never_carry_parameters_in_media_type` pins the shape.
+fn result_repr_type(media: &str) -> ReprType {
+    let mut parts = media.split(';').map(str::trim);
+    let mut repr = ReprType::new(parts.next().unwrap_or(media));
+    for param in parts.filter(|p| !p.is_empty()) {
+        if let Some((key, value)) = param.split_once('=') {
+            repr = repr.with_param(key.trim(), value.trim());
+        }
+    }
+    repr.with_param("charset", "utf-8")
+}
+
+/// The output faces of a query form — the `as=` values it can serialize — as the
+/// canonical `ReprType` strings its representations carry, default first. SELECT/ASK
+/// produce solution/boolean result sets; DESCRIBE/CONSTRUCT produce RDF.
+fn output_faces(verb: &str) -> &'static [&'static str] {
+    match verb {
+        "select" | "ask" => &[
+            "application/sparql-results+json;charset=utf-8",
+            "application/sparql-results+xml;charset=utf-8",
+            "text/csv;charset=utf-8",
+            "text/tab-separated-values;charset=utf-8",
+        ],
+        _ => &[
+            "text/turtle;charset=utf-8",
+            "application/n-triples;charset=utf-8",
+            "application/n-quads;charset=utf-8",
+            "application/trig;charset=utf-8",
+            "application/rdf+xml;charset=utf-8",
+            "application/ld+json;charset=utf-8",
+        ],
+    }
+}
+
 /// Sniff an input graph's syntax when its content-type isn't a known RDF media type:
 /// `{`/`[` ⇒ JSON-LD; a leading IRI `<scheme://…>` ⇒ Turtle; a leading XML element ⇒
 /// RDF/XML; else Turtle (subsumes N-Triples). Same discriminator as ikigai-rdf.
@@ -760,6 +807,55 @@ mod tests {
             None,
         );
         assert!(no.contains("false"));
+    }
+
+    /// The faces' media strings come from oxigraph, and two of them (CSV, TSV) carry
+    /// `; charset=utf-8` inline. Stored verbatim into `ReprType::media_type` — as 0.1.7
+    /// did — the canonical form read `text/csv; charset=utf-8;charset=utf-8`, which
+    /// matched no `want=`, no transreptor route, and not its own declared output.
+    /// Every face of every result kind: no `;` in `media_type`, the bare type exactly,
+    /// one charset param, and a canonical form equal to the declared output string.
+    #[test]
+    fn repr_types_never_carry_parameters_in_media_type() {
+        let a = [("http://g/a", A)];
+        let queries = [
+            ("select", "SELECT ?n WHERE { ?s <http://ex/name> ?n }"),
+            ("ask", "ASK { ?s <http://ex/name> \"Ada\" }"),
+            (
+                "construct",
+                "CONSTRUCT { ?s <http://ex/label> ?n } WHERE { ?s <http://ex/name> ?n }",
+            ),
+        ];
+        for (verb, query) in queries {
+            for face in output_faces(verb) {
+                let bare = media_base(face);
+                let (media, _) = run(&a, query, Some(bare));
+                let repr = result_repr_type(&media);
+                assert!(
+                    !repr.media_type.contains(';'),
+                    "{verb} as={bare}: media_type carries a parameter: {:?}",
+                    repr.media_type
+                );
+                assert_eq!(repr.media_type, bare, "{verb} as={bare}");
+                assert_eq!(repr.params.len(), 1, "{verb} as={bare}: {:?}", repr.params);
+                assert_eq!(repr.canonical(), *face, "{verb} as={bare}");
+            }
+        }
+        // The raw oxigraph strings that bit, and a real inline parameter survives.
+        let csv = result_repr_type("text/csv; charset=utf-8");
+        assert_eq!(
+            (csv.media_type.as_str(), csv.canonical().as_str()),
+            ("text/csv", "text/csv;charset=utf-8")
+        );
+        let tsv = result_repr_type("text/tab-separated-values; charset=utf-8");
+        assert_eq!(tsv.canonical(), "text/tab-separated-values;charset=utf-8");
+        let profiled =
+            result_repr_type("application/ld+json;profile=http://www.w3.org/ns/json-ld#streaming");
+        assert_eq!(profiled.media_type, "application/ld+json");
+        assert_eq!(
+            profiled.params.get("profile").map(String::as_str),
+            Some("http://www.w3.org/ns/json-ld#streaming")
+        );
     }
 
     #[test]
@@ -890,6 +986,51 @@ mod tests {
             )
             .unwrap();
             String::from_utf8(out.bytes).unwrap()
+        }
+
+        /// Declared = produced, through the kernel: each form's `describe().outputs`
+        /// lists every face in canonical form, the default first, and the representation
+        /// `as=<face>` returns carries EXACTLY that string. Both spaces — the shared
+        /// store and the per-query `space()` — since each has its own construction site.
+        #[test]
+        fn declared_outputs_are_the_produced_canonical_forms() {
+            let store = Arc::new(Store::new().unwrap());
+            store
+                .insert(&name_quad("http://ex/a", "Ada", GraphName::DefaultGraph))
+                .unwrap();
+            // What each form DECLARES, in both spaces, is exactly its face list.
+            for (verb, id) in FORMS {
+                for shared in [None, Some(Arc::clone(&store))] {
+                    let declared = SparqlEndpoint { verb, id, shared }.describe().outputs;
+                    assert_eq!(declared, output_faces(verb), "{id} declares its faces");
+                }
+            }
+            let kernels = [
+                kernel_over(&store),
+                Kernel::new(Arc::new(space())), // vocabulary alone: `graph=` is optional
+            ];
+            let queries = [
+                ("select", "SELECT ?n WHERE { ?s ?p ?n }"),
+                ("ask", "ASK { ?s ?p ?o }"),
+                ("describe", "DESCRIBE <http://ex/a>"),
+                ("construct", "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"),
+            ];
+            for kernel in &kernels {
+                for (verb, query) in queries {
+                    let iri = format!("urn:sparql:{verb}");
+                    let outputs = output_faces(verb);
+                    // Default first: no `as=` yields the first declared face.
+                    let default = issue(kernel, &iri, &[("query", query)]).unwrap();
+                    assert_eq!(default.repr_type.canonical(), outputs[0], "{iri} default");
+                    for face in outputs {
+                        let out =
+                            issue(kernel, &iri, &[("query", query), ("as", media_base(face))])
+                                .unwrap();
+                        assert!(!out.repr_type.media_type.contains(';'), "{iri} as={face}");
+                        assert_eq!(out.repr_type.canonical(), *face, "{iri} as={face}");
+                    }
+                }
+            }
         }
 
         #[test]
