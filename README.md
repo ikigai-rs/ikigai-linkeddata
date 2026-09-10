@@ -17,9 +17,15 @@ to render the constructed graph as an HTML table.
 | Crate | What it does |
 | --- | --- |
 | [`ikigai-rdf`](https://crates.io/crates/ikigai-rdf) | RDF **transreption** — `urn:rdf:transrept` re-serializes an RDF graph between syntaxes (Turtle, N-Triples, N-Quads, TriG, RDF/XML, JSON-LD) or renders it as an HTML table. Input syntax is sniffed. |
+| [`ikigai-sniff`](https://crates.io/crates/ikigai-sniff) | **Content-type sniffing and dispatch** — `urn:sniff` classifies opaque (`application/octet-stream`) bytes into a concrete media type by cheap prefix heuristics; `urn:transrept:auto` sniffs piped bytes and dispatches to the matching transreptor chain, so a caller can transrept without knowing the input type. |
 | [`ikigai-sparql`](https://crates.io/crates/ikigai-sparql) | **SPARQL** over resolvable graphs — `urn:sparql:{select,ask,construct,describe}` resolve `graph=` sources through the kernel (cacheable, golden-thread-invalidated), run `query=`, and serialize the results. Over a host's shared live store, `urn:sparql:update` adds the one **writing** verb: a transactional SPARQL 1.1 UPDATE, capability-gated on `urn:cap:sparql:update`. |
 
 See each crate's README for its endpoints, arguments, and serialization options.
+
+All three crates pass [`ikigai-conformance`](https://crates.io/crates/ikigai-conformance)
+— the module recipe as one test per crate (`crates/*/tests/conformance.rs`): typed inputs,
+every declared RDF face parsed and blank-node-free, vocabulary terms only, cacheability held
+to its marking, capabilities enforced as declared. No opt-outs.
 
 ## License
 

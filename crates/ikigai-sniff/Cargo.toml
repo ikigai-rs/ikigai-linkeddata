@@ -16,3 +16,6 @@ async-trait = "0.1"
 
 [dev-dependencies]
 futures = "0.3"
+# The module recipe as one test (`tests/conformance.rs`): walks every bound
+# endpoint and reports every violation at once. 0.1.0 is the first release.
+ikigai-conformance = "0.1.0"
