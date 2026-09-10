@@ -60,6 +60,18 @@ was piped in: a stable source (e.g. `urn:kernel:catalog`) yields a cacheable res
 a live fetch with no `Cache-Control` yields an uncacheable one. Cacheability flows down the
 pipe rather than being asserted unconditionally.
 
+`urn:rdf:union` and `urn:rdf:diff` are cacheable on the same terms: a set operation over
+the piped graph and `with=`, inheriting the `with=` resolution's expiry when that named a
+resource rather than inline Turtle.
+
+## Conformance
+
+Passes [`ikigai-conformance`](https://crates.io/crates/ikigai-conformance)
+(`tests/conformance.rs`): every input typed, every RDF face the transreptor declares —
+all six syntaxes — resolved, parsed and free of blank nodes, every term defined, and all
+three endpoints held to their `.cacheable()` marking as pure functions of their inputs.
+No opt-outs.
+
 ## License
 
 Licensed under either of MIT or Apache-2.0 at your option (`MIT OR Apache-2.0`).

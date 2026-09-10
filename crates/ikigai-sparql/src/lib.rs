@@ -220,6 +220,33 @@ pub const CAP_UPDATE: &str = "urn:cap:sparql:update";
 /// store-named cut) and neither bites while reads are uncacheable.
 pub const UPDATE_THREAD: &str = "urn:sparql:update";
 
+/// The XSD `string` datatype IRI — the `class` of every by-value input here: query and
+/// update text, a media type, and `graph=` (a list of IRIs — see its ArgSpec for why
+/// that is a string and not `xsd:anyURI`).
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+
+/// What SELECT and ASK serialize as — the SPARQL 1.1 results formats `as=` selects.
+/// The first is the default.
+const RESULTS_OUTPUTS: [&str; 4] = [
+    "application/sparql-results+json",
+    "application/sparql-results+xml",
+    "text/csv",
+    "text/tab-separated-values",
+];
+
+/// What CONSTRUCT and DESCRIBE serialize as — RDF faces, every one an `as=` value
+/// [`rdf_format`] accepts. The first is the default. Declared per form because a
+/// description that says `sparql-results+json` over a Turtle-producing action hides the
+/// RDF face from every consumer that reads outputs — a conformance walk included.
+const GRAPH_OUTPUTS: [&str; 6] = [
+    "text/turtle",
+    "application/n-triples",
+    "application/n-quads",
+    "application/trig",
+    "application/rdf+xml",
+    "application/ld+json",
+];
+
 /// The four query forms and their UNIQUE description ids (see [`SparqlEndpoint`]).
 const FORMS: [(&str, &str); 4] = [
     ("select", "sparql-select"),
@@ -337,12 +364,22 @@ impl Endpoint for SparqlEndpoint {
     }
 
     fn describe(&self) -> Description {
+        // CONSTRUCT and DESCRIBE answer with a graph; SELECT and ASK with a result set.
+        // The form is fixed by the IRI, so the default `as=` and the outputs are too.
+        let graph_form = matches!(self.verb, "construct" | "describe");
+        let outputs: &[&str] = if graph_form {
+            &GRAPH_OUTPUTS
+        } else {
+            &RESULTS_OUTPUTS
+        };
         let desc = Description::new(self.id)
             .title(format!("SPARQL {}", self.verb.to_uppercase()))
             .verb(Verb::Source)
             .verb(Verb::Meta)
             .input(
-                ArgSpec::new("query").summary("the SPARQL query (SELECT/ASK/DESCRIBE/CONSTRUCT)"),
+                ArgSpec::new("query")
+                    .summary("the SPARQL query (SELECT/ASK/DESCRIBE/CONSTRUCT)")
+                    .class(XSD_STRING),
             );
         // The two variants offer DIFFERENT arguments: the shared-store form has no
         // `graph=` (it would mutate the caller-owned store), and advertising it here
@@ -365,19 +402,23 @@ impl Endpoint for SparqlEndpoint {
                          each resolved through the kernel and loaded as a named graph. Omit to \
                          query the always-present ikigai vocabulary alone.",
                     )
+                    // A LIST of IRIs, and an ArgSpec has no way to say "many": `xsd:anyURI`
+                    // would tell a validator that `a, b` is malformed, which it is not.
+                    .class(XSD_STRING)
                     .optional(),
             )
         };
-        desc.input(
+        let desc = desc.input(
             ArgSpec::new("as")
                 .summary(
                     "result representation: SELECT/ASK → application/sparql-results+json \
                          (default), +xml, text/csv, text/tab-separated-values; \
                          CONSTRUCT/DESCRIBE → text/turtle (default), application/n-triples, …",
                 )
-                .optional(),
-        )
-        .output("application/sparql-results+json")
+                .class(XSD_STRING)
+                .default_value(outputs[0]),
+        );
+        outputs.iter().fold(desc, |desc, media| desc.output(*media))
     }
 }
 
@@ -513,11 +554,13 @@ impl Endpoint for SparqlUpdateEndpoint {
                          CLEAR / DROP / …); falls back to piped `content` — one of the two \
                          must be present",
                     )
+                    .class(XSD_STRING)
                     .optional(),
             )
             .input(
                 ArgSpec::new("content")
                     .summary("the SPARQL UPDATE text as piped content — the `… | urn:sparql:update` form")
+                    .class(XSD_STRING)
                     .optional(),
             )
             .output("text/plain;charset=utf-8")

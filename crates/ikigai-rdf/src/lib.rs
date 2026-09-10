@@ -25,6 +25,11 @@ use ikigai_core::{
 use oxrdf::{Graph, NamedOrBlankNode, Quad, Term};
 use oxrdfio::{RdfFormat, RdfParser, RdfSerializer};
 
+/// The XSD `string` datatype IRI — the `class` of every by-value input here. An RDF
+/// document, a graph reference-or-document, a media type and a mode token are all
+/// scalars an agent supplies as text; `ArgSpec` has no narrower class for a document.
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+
 /// The `rdfs:subClassOf` IRI.
 const SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 
@@ -126,10 +131,15 @@ impl Endpoint for UnionEndpoint {
         for triple in with_graph(inv, "urn:rdf:union").await?.iter() {
             graph.insert(triple);
         }
+        // A set operation over its inputs: cacheable, and — as with transrept — only
+        // as cacheable as the `with=` graph when that was resolved through the kernel
+        // (the kernel folds the dependency's expiry and threads in). Inline inputs
+        // carry no thread, and need none: the result is a function of the bytes.
         Ok(Representation::new(
             ReprType::new("text/turtle").with_param("charset", "utf-8"),
             serialize_graph(&graph)?,
-        ))
+        )
+        .cacheable())
     }
 
     fn name(&self) -> &str {
@@ -144,8 +154,16 @@ impl Endpoint for UnionEndpoint {
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
-            .input(ArgSpec::new("content").summary("the base Turtle graph — usually piped in"))
-            .input(ArgSpec::new("with").summary("the graph to union in: an IRI or inline Turtle"))
+            .input(
+                ArgSpec::new("content")
+                    .summary("the base Turtle graph — usually piped in")
+                    .class(XSD_STRING),
+            )
+            .input(
+                ArgSpec::new("with")
+                    .summary("the graph to union in: an IRI or inline Turtle")
+                    .class(XSD_STRING),
+            )
             .output("text/turtle")
     }
 }
@@ -180,10 +198,13 @@ impl Endpoint for DiffEndpoint {
                 delta.insert(triple);
             }
         }
+        // Cacheable for the same reason union is: a set difference of its inputs,
+        // inheriting the `with=` resolution's expiry when that was a resource.
         Ok(Representation::new(
             ReprType::new("text/turtle").with_param("charset", "utf-8"),
             serialize_graph(&delta)?,
-        ))
+        )
+        .cacheable())
     }
 
     fn name(&self) -> &str {
@@ -198,11 +219,20 @@ impl Endpoint for DiffEndpoint {
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
-            .input(ArgSpec::new("content").summary("the desired Turtle graph — usually piped in"))
-            .input(ArgSpec::new("with").summary("the current graph: an IRI or inline Turtle"))
+            .input(
+                ArgSpec::new("content")
+                    .summary("the desired Turtle graph — usually piped in")
+                    .class(XSD_STRING),
+            )
+            .input(
+                ArgSpec::new("with")
+                    .summary("the current graph: an IRI or inline Turtle")
+                    .class(XSD_STRING),
+            )
             .input(
                 ArgSpec::new("mode")
                     .summary("which side of the diff to keep")
+                    .class(XSD_STRING)
                     .one_of(["added", "removed"])
                     .default_value("added"),
             )
@@ -218,50 +248,69 @@ pub fn space() -> EndpointSpace {
             Exact::new("urn:rdf:transrept"),
             FnEndpoint::new("rdf-transrept", |inv: &Invocation<'_>| transrept(inv))
                 .with_description(
-                Description::new("rdf-transrept")
-                    .title("RDF transreption")
-                    .summary(
-                        "Re-serialize an RDF graph into another syntax — client-side content \
+                    Description::new("rdf-transrept")
+                        .title("RDF transreption")
+                        .summary(
+                            "Re-serialize an RDF graph into another syntax — client-side content \
                      negotiation. Pipe a resource in and choose `as`.",
-                    )
-                    .verb(Verb::Source)
-                    .verb(Verb::Meta)
-                    .input(ArgSpec::new("content").summary(
-                        "the RDF document to transrept — usually piped in (e.g. from urn:httpGet)",
-                    ))
-                    .input(ArgSpec::new("as").summary(
-                        "target representation: text/turtle (default), application/n-triples, \
-                     application/n-quads, application/trig, application/rdf+xml, \
-                     application/ld+json, or text/html",
-                    ))
-                    .output("text/turtle;charset=utf-8")
-                    // First-class `ik:Transreptor`: the media types it converts between. The
-                    // input syntax is *sniffed* (see `sniff`), so it accepts opaque
-                    // `application/octet-stream` too — the universal "raw, not-yet-typed
-                    // bytes" a fetch or file read delivers. `text/html` is output-only (the
-                    // human subject/predicate/object table). Drives selection: a single
-                    // auto-invocable hop (`content` + `as`) over any of these.
-                    .transreptor(
-                        [
-                            "text/turtle",
-                            "application/n-triples",
-                            "application/n-quads",
-                            "application/trig",
-                            "application/rdf+xml",
-                            "application/ld+json",
-                            "application/octet-stream",
-                        ],
-                        [
-                            "text/turtle",
-                            "application/n-triples",
-                            "application/n-quads",
-                            "application/trig",
-                            "application/rdf+xml",
-                            "application/ld+json",
-                            "text/html",
-                        ],
-                    ),
-            ),
+                        )
+                        .verb(Verb::Source)
+                        .verb(Verb::Meta)
+                        .input(
+                            ArgSpec::new("content")
+                                .summary(
+                                    "the RDF document to transrept — usually piped in (e.g. from \
+                                 urn:httpGet)",
+                                )
+                                .class(XSD_STRING),
+                        )
+                        .input(
+                            ArgSpec::new("as")
+                                .summary(
+                                    "target representation: text/turtle (default), \
+                                 application/n-triples, application/n-quads, application/trig, \
+                                 application/rdf+xml, application/ld+json, or text/html",
+                                )
+                                .class(XSD_STRING)
+                                .default_value("text/turtle"),
+                        )
+                        // Every face `as=` can select is a declared output — the same list as
+                        // the transreptor's `to` below (a test pins that). Declaring them all is
+                        // what lets a conformance walk resolve and parse each RDF face in turn.
+                        .output("text/turtle")
+                        .output("application/n-triples")
+                        .output("application/n-quads")
+                        .output("application/trig")
+                        .output("application/rdf+xml")
+                        .output("application/ld+json")
+                        .output("text/html")
+                        // First-class `ik:Transreptor`: the media types it converts between. The
+                        // input syntax is *sniffed* (see `sniff`), so it accepts opaque
+                        // `application/octet-stream` too — the universal "raw, not-yet-typed
+                        // bytes" a fetch or file read delivers. `text/html` is output-only (the
+                        // human subject/predicate/object table). Drives selection: a single
+                        // auto-invocable hop (`content` + `as`) over any of these.
+                        .transreptor(
+                            [
+                                "text/turtle",
+                                "application/n-triples",
+                                "application/n-quads",
+                                "application/trig",
+                                "application/rdf+xml",
+                                "application/ld+json",
+                                "application/octet-stream",
+                            ],
+                            [
+                                "text/turtle",
+                                "application/n-triples",
+                                "application/n-quads",
+                                "application/trig",
+                                "application/rdf+xml",
+                                "application/ld+json",
+                                "text/html",
+                            ],
+                        ),
+                ),
         )
 }
 

@@ -56,6 +56,12 @@ const JPEG: &str = "image/jpeg";
 const GIF: &str = "image/gif";
 const GZIP: &str = "application/gzip";
 
+/// The XSD `string` datatype IRI — the `class` of the by-value inputs here. `content` is
+/// opaque bytes and may well be binary; `xsd:string` is what the wire carries (a piped
+/// value, an MCP argument) and `ArgSpec` has no class for "bytes of unknown type", which
+/// is the very question `urn:sniff` answers.
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+
 /// A single content-type heuristic. Returns the detected media type if the bytes look like
 /// its family, else `None` so the next detector gets a turn. Implementations must not parse
 /// or allocate large buffers — only inspect a bounded prefix.
@@ -246,9 +252,14 @@ pub fn space() -> EndpointSpace {
                     )
                     .verb(Verb::Source)
                     .verb(Verb::Meta)
-                    .input(ArgSpec::new("content").summary(
-                        "the bytes to classify — usually piped in (e.g. from urn:httpGet or a file)",
-                    ))
+                    .input(
+                        ArgSpec::new("content")
+                            .summary(
+                                "the bytes to classify — usually piped in (e.g. from urn:httpGet \
+                                 or a file)",
+                            )
+                            .class(XSD_STRING),
+                    )
                     .output("text/plain;charset=utf-8"),
             ),
         )
@@ -311,10 +322,20 @@ impl Endpoint for AutoTransrept {
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
-            .input(ArgSpec::new("content").summary(
-                "the bytes to transrept — usually piped in (e.g. from urn:httpGet or a file)",
-            ))
-            .input(ArgSpec::new("as").summary("target media type (default text/turtle)"))
+            .input(
+                ArgSpec::new("content")
+                    .summary(
+                        "the bytes to transrept — usually piped in (e.g. from urn:httpGet or a \
+                         file)",
+                    )
+                    .class(XSD_STRING),
+            )
+            .input(
+                ArgSpec::new("as")
+                    .summary("target media type (default text/turtle)")
+                    .class(XSD_STRING)
+                    .default_value(TURTLE),
+            )
     }
 }
 

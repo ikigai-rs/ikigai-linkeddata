@@ -19,6 +19,9 @@ async-trait = "0.1"
 [dev-dependencies]
 # block_on for driving kernel.issue in the shared-store tests.
 futures = "0.3"
+# The module recipe as one test (`tests/conformance.rs`): walks every bound
+# endpoint and reports every violation at once. 0.1.0 is the first release.
+ikigai-conformance = "0.1.0"
 
 # Oxigraph's `js` feature wires getrandom's wasm backend (paired with the
 # getrandom_backend cfg in .cargo/config.toml), so the store/query run in the browser.

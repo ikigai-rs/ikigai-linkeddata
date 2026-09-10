@@ -169,6 +169,17 @@ a change to any underlying graph auto-invalidates the cached result. An `http(s)
 is fetched via `urn:httpGet`, so its own cache policy propagates into the query result;
 `urn:`/`file:` graphs resolve directly.
 
+## Conformance
+
+Passes [`ikigai-conformance`](https://crates.io/crates/ikigai-conformance)
+(`tests/conformance.rs`), once per space: every input typed; CONSTRUCT and DESCRIBE
+declare their six RDF faces (and SELECT/ASK their four result formats) so each face is
+resolved, parsed and read for blank nodes and undefined terms — over the always-loaded
+vocabulary, which is therefore checked on every walk; `space()`'s forms held to their
+`.cacheable()` marking as pure functions of query and vocabulary; `urn:sparql:update`
+refused without its capability and proven to read piped `content` by the write landing.
+No opt-outs.
+
 ## License
 
 Licensed under either of MIT or Apache-2.0 at your option (`MIT OR Apache-2.0`).
