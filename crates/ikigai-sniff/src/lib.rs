@@ -23,9 +23,15 @@
 //! | `<!doctype html` / `<html` | `text/html` |
 //! | `<rdf:RDF` or the RDF-syntax namespace | `application/rdf+xml` |
 //! | another XML element (`<?xml`, `<Foo`) | `application/xml` |
-//! | `@prefix` / `@base` / `PREFIX` / `BASE` / a comment / an `<scheme://…>` subject | `text/turtle` |
+//! | `@prefix` / `@base` / `PREFIX` / `BASE` / a comment / an `<scheme:…>` IRI subject | `text/turtle` |
 //! | other valid UTF-8 text | `text/plain` |
 //! | anything else | `application/octet-stream` |
+//!
+//! The one subtle row is the last `<`: Turtle's `<scheme:…>` subject and XML's `<element`
+//! tag open with the same byte, and they are told apart by `angle_token_is_iri` — an IRI
+//! reference closes with no whitespace, quote or `<` in it and leads with a URI scheme,
+//! where an element tag either carries attributes or is a bare XML QName like `<rdf:RDF>`.
+//! *Not* by looking for `://`, which asks about an authority: `urn:` has none.
 //!
 //! Detectors are pluggable ([`Detector`]) and run in priority order ([`detectors`]), so
 //! binary detectors (PDF/PNG/gzip magic bytes, …) slot in later without disturbing this set.
@@ -83,7 +89,7 @@ pub fn detectors() -> Vec<Box<dyn Detector>> {
         Box::new(MagicDetector),
         Box::new(JsonDetector),
         // Turtle before Markup: both inspect a leading `<`, but they are mutually exclusive —
-        // Turtle claims an `<scheme://…>` IRI subject, Markup claims an `<element` tag.
+        // Turtle claims an `<scheme:…>` IRI subject, Markup claims an `<element` tag.
         Box::new(TurtleDetector),
         Box::new(MarkupDetector),
     ]
@@ -154,7 +160,7 @@ impl Detector for JsonDetector {
 }
 
 /// Turtle / N-Triples family: a leading `@prefix`/`@base`, a SPARQL-style `PREFIX`/`BASE`
-/// header, a `#` comment, or an `<scheme://…>` IRI subject (an N-Triples/Turtle triple).
+/// header, a `#` comment, or an `<scheme:…>` IRI subject (an N-Triples/Turtle triple).
 /// All map to `text/turtle` (a superset of N-Triples).
 struct TurtleDetector;
 impl Detector for TurtleDetector {
@@ -162,7 +168,7 @@ impl Detector for TurtleDetector {
         let rest = lead(bytes);
         match rest.first()? {
             b'@' | b'#' => Some(TURTLE), // @prefix / @base / a comment
-            b'<' if angle_token_is_iri(rest) => Some(TURTLE), // <scheme://…> subject
+            b'<' if angle_token_is_iri(rest) => Some(TURTLE), // <scheme:…> subject
             _ if starts_with_ci(rest, b"prefix ") || starts_with_ci(rest, b"base ") => Some(TURTLE),
             _ => None,
         }
@@ -206,17 +212,74 @@ fn lead(bytes: &[u8]) -> &[u8] {
     &bytes[n..]
 }
 
-/// For a leading `<…>` token, whether it is an IRI (carries a `://` scheme separator) rather
-/// than an XML element tag. Both syntaxes open with `<`; the `://` is the discriminator
-/// (same test `urn:rdf:transrept` uses internally).
+/// For a leading `<…>` token, whether it is a Turtle/N-Triples IRI subject rather than an
+/// XML start tag. Both syntaxes open with `<`, so this is the whole of the distinction.
+///
+/// The test used to be "does the token contain `://`?", which asks about an *authority*,
+/// not a scheme — so every `urn:` IRI (the scheme ikigai names all of its resources with)
+/// read as an element tag and its document as RDF/XML. Three cheap signals replace it,
+/// all on the bracketed token alone:
+///
+/// 1. it closes within the scan window, with no character Turtle's `IRIREF` production
+///    forbids before the `>` — which rules out every start tag carrying attributes, plus
+///    `<?xml …?>` and `<!DOCTYPE …>`;
+/// 2. the text before its first `:` is a URI scheme ([`is_uri_scheme`]) with something
+///    after the colon — `<doc>` and `<html>` carry no scheme at all;
+/// 3. it is not *also* a well-formed XML QName ([`is_xml_qname`]). This is the tie-break
+///    `://` was standing in for: an XML name admits only letters, digits, `.`, `-`, `_`
+///    and the one prefix colon, so an attribute-less `<rdf:RDF>` satisfies (1) and (2) and
+///    is resolved as markup, while `urn:demo:a`'s second colon and `http://ex/a`'s slashes
+///    cannot occur in one.
+///
+/// What stays ambiguous is the residue: a single-colon, all-name-character IRI such as
+/// `<urn:x>` reads as a tag. Nothing in the token separates the two shapes, and ikigai's
+/// own URNs are `urn:nid:nss`, so this is documented rather than guessed at.
 fn angle_token_is_iri(rest: &[u8]) -> bool {
-    let token: Vec<u8> = rest
-        .iter()
-        .skip(1)
-        .take_while(|&&b| b != b'>' && !b.is_ascii_whitespace())
-        .copied()
-        .collect();
-    token.windows(3).any(|w| w == b"://")
+    let window = &rest[1..rest.len().min(SCAN)];
+    let Some(end) = window.iter().position(|&b| b == b'>') else {
+        return false; // unterminated within the window: not an IRI reference
+    };
+    let token = &window[..end];
+    if !token.iter().all(|&b| is_iri_char(b)) {
+        return false;
+    }
+    let Some(colon) = token.iter().position(|&b| b == b':') else {
+        return false;
+    };
+    let (scheme, after_scheme) = token.split_at(colon);
+    is_uri_scheme(scheme) && after_scheme.len() > 1 && !is_xml_qname(token)
+}
+
+/// Whether a byte may appear inside a Turtle `IRIREF`. The production excludes the ASCII
+/// control range, the space, and ``"<>\^`{|}`` — the same set RFC 3987 keeps out of an IRI.
+/// (A single quote is *not* excluded; an attribute written with them, `xmlns='…'`, is
+/// caught by the space in front of it.)
+fn is_iri_char(b: u8) -> bool {
+    !(b <= 0x20
+        || b == 0x7F
+        || matches!(
+            b,
+            b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}'
+        ))
+}
+
+/// Whether the bytes are a URI scheme: `[A-Za-z][A-Za-z0-9+.-]*` (RFC 3986 §3.1).
+fn is_uri_scheme(bytes: &[u8]) -> bool {
+    matches!(bytes.first(), Some(b) if b.is_ascii_alphabetic())
+        && bytes[1..]
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+}
+
+/// Whether the token is *also* a well-formed XML QName — `prefix:local`, where both parts
+/// are XML names — which is the shape an RDF/XML root tag takes when it carries no
+/// attributes (`<rdf:RDF>`). ASCII-only: a non-ASCII name character puts the token outside
+/// the overlap this has to arbitrate, and `is_iri_char` has already admitted it as an IRI.
+fn is_xml_qname(token: &[u8]) -> bool {
+    token.iter().filter(|&&b| b == b':').count() == 1
+        && token
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -373,9 +436,49 @@ mod tests {
 
     #[test]
     fn distinguishes_iri_subject_from_xml_element() {
-        // Both open with `<`; the `://` scheme separator is the discriminator.
+        // Both open with `<`. An IRI reference closes with no whitespace or quote in it
+        // and leads with a URI scheme; an element tag carries attributes or is a QName.
         assert_eq!(sniff(b"<http://ex/a> <http://ex/b> 1 ."), TURTLE);
         assert_eq!(sniff(b"<doc><item>x</item></doc>"), XML);
+    }
+
+    #[test]
+    fn a_urn_subject_is_turtle_not_rdfxml() {
+        // The regression this test exists for: `urn:` has no authority, so the old `://`
+        // discriminator read every ikigai resource IRI as an XML tag and handed a Turtle
+        // document to the RDF/XML parser ("Unknown prefix urn:"). One colon after the
+        // scheme is enough — `urn:demo:a` cannot be an XML QName, which admits only one.
+        assert_eq!(sniff(b"<urn:demo:a> <urn:demo:b> <urn:demo:c> .\n"), TURTLE);
+        assert_eq!(
+            sniff(b"<urn:demo:a> <urn:demo:b> \"lit\" .\n<urn:demo:c> a <urn:demo:D> .\n"),
+            TURTLE
+        );
+        // Other authority-less schemes ride along with it.
+        assert_eq!(sniff(b"<mailto:ada@ex.org> <urn:demo:p> 1 ."), TURTLE);
+        assert_eq!(sniff(b"<tag:ex.org,2026:a> <urn:demo:p> 1 ."), TURTLE);
+        assert_eq!(sniff(b"<did:web:ex.org> <urn:demo:p> 1 ."), TURTLE);
+    }
+
+    #[test]
+    fn an_rdfxml_root_is_markup_with_or_without_attributes() {
+        // With attributes: whitespace inside the token settles it.
+        assert_eq!(
+            sniff(
+                br#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"></rdf:RDF>"#
+            ),
+            RDFXML
+        );
+        // Bare: no whitespace, and `rdf` is a valid scheme — so the QName test is what
+        // keeps it markup. (An undeclared prefix makes this invalid RDF/XML, but the
+        // sniff must not read it as Turtle and mis-name the parse error.)
+        assert_eq!(sniff(b"<rdf:RDF></rdf:RDF>"), RDFXML);
+        assert_eq!(sniff(b"<soap:Envelope></soap:Envelope>"), XML);
+        // A declaration or a doctype is never an IRI: neither opens with a scheme.
+        assert_eq!(
+            sniff(br#"<?xml version="1.0"?><note><to>x</to></note>"#),
+            XML
+        );
+        assert_eq!(sniff(b"<!DOCTYPE note SYSTEM \"note.dtd\"><note/>"), XML);
     }
 
     #[test]
@@ -489,6 +592,27 @@ mod tests {
         let body = String::from_utf8(rep.bytes).unwrap();
         assert!(body.starts_with("<table>"), "transreptor ran: {body}");
         assert!(body.contains("ex:a"), "over the sniffed turtle: {body}");
+    }
+
+    #[test]
+    fn auto_dispatches_a_graph_whose_subjects_are_all_urns() {
+        // The end of the reported failure: `source urn:<a graph> | urn:transrept:auto`.
+        // Every subject is a `urn:`, so the old discriminator sniffed RDF/XML and the
+        // chain selected for it (or, in the real kernel, the RDF/XML parser) never saw
+        // Turtle. Both arms of the dispatcher have to survive it.
+        let ttl = b"<urn:demo:a> <urn:demo:b> <urn:demo:c> .\n";
+        let rep = run_auto(ttl, "text/html").unwrap();
+        assert_eq!(rep.repr_type.media_type, "text/html");
+        let body = String::from_utf8(rep.bytes).unwrap();
+        assert!(body.starts_with("<table>"), "turtle→html ran: {body}");
+        assert!(
+            body.contains("urn:demo:a"),
+            "over the sniffed turtle: {body}"
+        );
+        // Pass-through arm: sniffed type == requested type, no chain needed.
+        let rep = run_auto(ttl, "text/turtle").unwrap();
+        assert_eq!(rep.repr_type.media_type, "text/turtle");
+        assert_eq!(rep.bytes, ttl);
     }
 
     #[test]
