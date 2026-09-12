@@ -19,6 +19,26 @@
 //!   by design — it is covered by this crate's unit tests with a stub, and by
 //!   `ikigai-rdf`'s own walk for the real one.
 //!
+//! ## OUTPUTS on a dispatcher: declared, not waived
+//!
+//! `transrept-auto` serves whatever `as=` names, so its output set is open and
+//! `outputs` — a closed list — cannot state it (core PENDING §20). The sibling
+//! precedent for that shape is a per-check waiver. It is **not** used here, and the
+//! difference is worth stating because it is easy to copy the wrong half:
+//!
+//! - `urn:httpGet` serves the *origin's* `Content-Type`. There is no face it picks
+//!   for itself, so no declaration can be true and the waiver is the only honest move.
+//! - `urn:transrept:auto` picks one: `inline_str("as").unwrap_or(TURTLE)`, matching
+//!   the `as` ArgSpec's `default_value`. The walk's minimal call supplies no `as`
+//!   (it is optional), so what OUTPUTS observes **is** that own choice, and
+//!   `.output("text/turtle")` is true rather than fixture-shaped. It was verified by
+//!   watching the check go green on the declaration alone.
+//!
+//! `opt_out_check` is all-or-nothing per check, so waiving "the open remainder" would
+//! also waive the default and leave a changed default caught by nothing. Declaring
+//! costs nothing and keeps that guard; the remainder is pinned instead by
+//! `as_selects_the_served_type` in the crate's own tests, and named in `describe()`.
+//!
 //! No opt-outs, no module namespace (there is no RDF face), and NAMES runs:
 //! both ids are kebab-case.
 

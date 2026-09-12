@@ -603,7 +603,7 @@ fn serialize_results(results: QueryResults, as_type: Option<&str>) -> Result<(St
     let io = |e: std::io::Error| Error::Endpoint(format!("serialize: {e}"));
     match results {
         QueryResults::Solutions(solutions) => {
-            let format = results_format(as_type).unwrap_or(QueryResultsFormat::Json);
+            let format = results_format_or_default(as_type)?;
             let variables = solutions.variables().to_vec();
             let mut serializer = QueryResultsSerializer::from_format(format)
                 .serialize_solutions_to_writer(Vec::new(), variables)
@@ -618,14 +618,14 @@ fn serialize_results(results: QueryResults, as_type: Option<&str>) -> Result<(St
             ))
         }
         QueryResults::Boolean(value) => {
-            let format = results_format(as_type).unwrap_or(QueryResultsFormat::Json);
+            let format = results_format_or_default(as_type)?;
             let bytes = QueryResultsSerializer::from_format(format)
                 .serialize_boolean_to_writer(Vec::new(), value)
                 .map_err(io)?;
             Ok((format.media_type().to_string(), bytes))
         }
         QueryResults::Graph(triples) => {
-            let format = rdf_format(as_type.unwrap_or("text/turtle")).unwrap_or(RdfFormat::Turtle);
+            let format = graph_format_or_default(as_type)?;
             let mut serializer = RdfSerializer::from_format(format).for_writer(Vec::new());
             for triple in triples {
                 let triple = triple.map_err(|e| Error::Endpoint(format!("query: {e}")))?;
@@ -639,6 +639,45 @@ fn serialize_results(results: QueryResults, as_type: Option<&str>) -> Result<(St
             ))
         }
     }
+}
+
+/// The SELECT/ASK format for an `as` the caller either gave or did not.
+///
+/// **A bound must refuse, not substitute.** Absent an `as=` this picks the declared
+/// default; given one it cannot serve, it *errors* rather than quietly answering in some
+/// other format. Substituting made the declared `outputs` list true by accident instead of
+/// by contract — `as=text/turtle` on a SELECT returned JSON, and a typo (`as=jsno`) came
+/// back as a plausible answer in the wrong syntax with nothing said. `urn:rdf:transrept`
+/// has always refused the same way; these two arms were the outliers.
+fn results_format_or_default(as_type: Option<&str>) -> Result<QueryResultsFormat> {
+    let Some(spec) = as_type else {
+        return Ok(QueryResultsFormat::Json);
+    };
+    results_format(Some(spec)).ok_or_else(|| {
+        Error::Endpoint(format!(
+            "SPARQL SELECT/ASK: unknown target `{spec}` — try \
+             application/sparql-results+json, application/sparql-results+xml, text/csv, \
+             or text/tab-separated-values (short aliases json, xml, csv, tsv are accepted). \
+             A graph syntax is not one of them: only CONSTRUCT and DESCRIBE answer with a graph"
+        ))
+    })
+}
+
+/// The CONSTRUCT/DESCRIBE format for an `as` the caller either gave or did not — the graph
+/// half of [`results_format_or_default`], refusing on the same terms and for the same reason.
+fn graph_format_or_default(as_type: Option<&str>) -> Result<RdfFormat> {
+    let Some(spec) = as_type else {
+        return Ok(RdfFormat::Turtle);
+    };
+    rdf_format(spec).ok_or_else(|| {
+        Error::Endpoint(format!(
+            "SPARQL CONSTRUCT/DESCRIBE: unknown target `{spec}` — try text/turtle, \
+             application/n-triples, application/n-quads, application/trig, \
+             application/rdf+xml, or application/ld+json (short aliases ttl, nt, nq, trig, \
+             rdfxml, jsonld are accepted). A results syntax is not one of them: only SELECT \
+             and ASK answer with a result set"
+        ))
+    })
 }
 
 /// SELECT/ASK result format from an `as` media type or short alias.
@@ -911,6 +950,130 @@ mod tests {
             None,
         );
         assert!(no.contains("false"));
+    }
+
+    /// Like [`run`], but hands back the `Result` so a refusal is observable.
+    fn try_run(graphs: &[(&str, &str)], query: &str, as_type: Option<&str>) -> Result<String> {
+        let store = store_with_vocabulary().unwrap();
+        for (uri, ttl) in graphs {
+            store
+                .load_from_slice(
+                    RdfParser::from_format(RdfFormat::Turtle)
+                        .with_default_graph(NamedNodeRef::new(uri).unwrap()),
+                    ttl.as_bytes(),
+                )
+                .unwrap();
+        }
+        let results = evaluate(query, &store).unwrap();
+        serialize_results(results, as_type).map(|(media, _)| media)
+    }
+
+    #[test]
+    fn an_unknown_as_is_refused_not_substituted() {
+        // A bound must refuse, not substitute. Each of these used to serialize in the
+        // default format and say nothing, which made a typo indistinguishable from a
+        // deliberate choice and the declared `outputs` list true only by accident.
+        let graphs = &[("http://g/a", A)][..];
+        let select = "SELECT ?name WHERE { ?s <http://ex/name> ?name }";
+        let ask = "ASK { ?s <http://ex/name> \"Ada\" }";
+        let construct = "CONSTRUCT { ?s <http://ex/label> ?n } WHERE { ?s <http://ex/name> ?n }";
+
+        for (query, bad) in [(select, "jsno"), (ask, "application/nonsense")] {
+            let err = format!("{}", try_run(graphs, query, Some(bad)).unwrap_err());
+            assert!(
+                err.contains("unknown target") && err.contains(bad),
+                "SELECT/ASK must name the target it refused: {err}"
+            );
+        }
+        let err = format!("{}", try_run(graphs, construct, Some("ttl2")).unwrap_err());
+        assert!(
+            err.contains("unknown target") && err.contains("ttl2"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_cross_form_as_is_refused_rather_than_silently_ignored() {
+        // The sharpest case, because it looks like a legitimate request: a graph syntax
+        // asked of SELECT, or a results syntax asked of CONSTRUCT. Both are well-formed
+        // media types the *other* form serves, and both used to come back in the default
+        // format — the caller's `as=` silently dropped on the floor.
+        let graphs = &[("http://g/a", A)][..];
+        let err = format!(
+            "{}",
+            try_run(
+                graphs,
+                "SELECT ?name WHERE { ?s <http://ex/name> ?name }",
+                Some("text/turtle"),
+            )
+            .unwrap_err()
+        );
+        assert!(err.contains("CONSTRUCT and DESCRIBE"), "{err}");
+        let err = format!(
+            "{}",
+            try_run(
+                graphs,
+                "CONSTRUCT { ?s <http://ex/label> ?n } WHERE { ?s <http://ex/name> ?n }",
+                Some("application/sparql-results+json"),
+            )
+            .unwrap_err()
+        );
+        assert!(err.contains("SELECT and ASK"), "{err}");
+    }
+
+    #[test]
+    fn every_declared_output_is_actually_servable() {
+        // The other direction of the same contract: refusing an unknown `as=` is only
+        // honest if everything the manifold announces is accepted. Walks both declared
+        // lists through the real serializer.
+        let graphs = &[("http://g/a", A)][..];
+        for media in RESULTS_OUTPUTS {
+            let got = try_run(
+                graphs,
+                "SELECT ?name WHERE { ?s <http://ex/name> ?name }",
+                Some(media),
+            )
+            .unwrap_or_else(|e| panic!("declared output `{media}` is refused: {e}"));
+            assert_eq!(media_base(&got), media, "served what was asked for");
+        }
+        for media in GRAPH_OUTPUTS {
+            let got = try_run(
+                graphs,
+                "CONSTRUCT { ?s <http://ex/label> ?n } WHERE { ?s <http://ex/name> ?n }",
+                Some(media),
+            )
+            .unwrap_or_else(|e| panic!("declared output `{media}` is refused: {e}"));
+            assert_eq!(media_base(&got), media, "served what was asked for");
+        }
+    }
+
+    #[test]
+    fn an_absent_as_still_takes_the_declared_default() {
+        // Refusing must not swallow the no-`as=` case: absent an `as=`, each form serves
+        // the first entry of its own declared list, which is what `default_value` promises.
+        let graphs = &[("http://g/a", A)][..];
+        assert_eq!(
+            media_base(
+                &try_run(
+                    graphs,
+                    "SELECT ?name WHERE { ?s <http://ex/name> ?name }",
+                    None
+                )
+                .unwrap()
+            ),
+            RESULTS_OUTPUTS[0]
+        );
+        assert_eq!(
+            media_base(
+                &try_run(
+                    graphs,
+                    "CONSTRUCT { ?s <http://ex/label> ?n } WHERE { ?s <http://ex/name> ?n }",
+                    None,
+                )
+                .unwrap()
+            ),
+            GRAPH_OUTPUTS[0]
+        );
     }
 
     #[test]

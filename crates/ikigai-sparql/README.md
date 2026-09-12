@@ -38,6 +38,11 @@ distinct, discoverable IRIs. Each accepts the same arguments:
   This composes with [`ikigai-rdf`](https://crates.io/crates/ikigai-rdf)'s
   `urn:rdf:transrept` for an HTML-table view of the constructed graph.
 
+Each list is what that form actually serves, and an `as=` outside it is **refused** rather
+than substituted — including one the *other* form serves (`as=text/turtle` on a SELECT).
+The error names the target and the formats that form accepts. Omitting `as=` takes the
+default; giving one that cannot be honored is an error, never a quiet fallback.
+
 ## Usage
 
 ```shell

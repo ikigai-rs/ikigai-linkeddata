@@ -399,6 +399,21 @@ impl Endpoint for AutoTransrept {
                     .class(XSD_STRING)
                     .default_value(TURTLE),
             )
+            // The ONE face this endpoint chooses by itself: with no `as=`, `invoke`
+            // targets `TURTLE`, so `text/turtle` is a declaration that is true rather
+            // than one today's fixture happened to produce.
+            //
+            // What it deliberately does NOT announce is the rest of the set. Called
+            // with `as=X` this serves X, for any X some *bound* transreptor chain
+            // reaches — a set that belongs to the host's bindings, not to this
+            // endpoint, and that therefore changes under it. `outputs` is a closed
+            // list with no spelling for "follows `as=`" (core PENDING §20,
+            // ikigai-conformance #48), and enumerating a guess would make the
+            // manifold over-offer, which is the worse of the two errors. So the
+            // default is declared, the open remainder is pinned by hand in
+            // `as_selects_the_served_type` below, and this comment is the record
+            // until core can say "any".
+            .output(TURTLE)
     }
 }
 
@@ -613,6 +628,57 @@ mod tests {
         let rep = run_auto(ttl, "text/turtle").unwrap();
         assert_eq!(rep.repr_type.media_type, "text/turtle");
         assert_eq!(rep.bytes, ttl);
+    }
+
+    /// Resolve `urn:transrept:auto` with **no** `as` argument at all — the call the
+    /// conformance walk makes, and the only one that observes the endpoint's own choice.
+    fn run_auto_default(content: &[u8]) -> Result<Representation> {
+        let request = Request::new(Verb::Source, Iri::parse("urn:transrept:auto").unwrap())
+            .with_arg("content", ArgRef::Inline(content.to_vec()));
+        futures::executor::block_on(auto_kernel().issue(request, &Capability::root()))
+    }
+
+    #[test]
+    fn auto_serves_text_turtle_when_no_as_is_given() {
+        // The declared output (`.output(TURTLE)`) is exactly this: absent an `as=`,
+        // `invoke` targets text/turtle, so that face is the endpoint's own and the
+        // manifold announces it. Changing the default without changing the
+        // declaration breaks here and in the conformance walk together.
+        assert_eq!(
+            run_auto_default(b"<urn:demo:a> <urn:demo:b> <urn:demo:c> .\n")
+                .unwrap()
+                .repr_type
+                .media_type,
+            TURTLE
+        );
+        // Reached by dispatch as well as by pass-through: the chain is selected *to*
+        // the default, so the default holds whichever arm ran.
+        assert_eq!(
+            run_auto_default(b"@prefix ex: <http://e/> . ex:a ex:b ex:c .")
+                .unwrap()
+                .repr_type
+                .media_type,
+            TURTLE
+        );
+    }
+
+    #[test]
+    fn as_selects_the_served_type() {
+        // What the single declared output gives up, pinned by hand because `outputs`
+        // cannot spell it (core PENDING §20): with an `as=`, the served type FOLLOWS
+        // the caller over a set the host's bindings decide, not this endpoint.
+        let ttl = b"@prefix ex: <http://e/> . ex:a ex:b ex:c .";
+        for target in [TURTLE, "text/html"] {
+            assert_eq!(
+                run_auto(ttl, target).unwrap().repr_type.media_type,
+                target,
+                "as={target} is the served type"
+            );
+        }
+        // And an `as=` nothing reaches is refused, not quietly served as the declared
+        // default — the declaration is a face, never a fallback.
+        let err = format!("{}", run_auto(ttl, "application/pdf").unwrap_err());
+        assert!(err.contains("no transreptor"), "{err}");
     }
 
     #[test]
