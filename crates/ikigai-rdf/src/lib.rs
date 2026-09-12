@@ -373,30 +373,91 @@ fn transrept_bytes(input: &[u8], as_type: &str) -> Result<(String, Vec<u8>)> {
 }
 
 /// Sniff the input syntax from its opening token: `{`/`[` ⇒ JSON-LD; a leading `<…>`
-/// that is an IRI (`<scheme://…>`) ⇒ Turtle/N-Triples (a triple's subject), whereas a
+/// that is an IRI (`<scheme:…>`) ⇒ Turtle/N-Triples (a triple's subject), whereas a
 /// leading `<` opening an XML element (`<?xml`, `<rdf:RDF`, `<Foo`) ⇒ RDF/XML; anything
 /// else (`@prefix`, a prefixed name, a comment) ⇒ Turtle, which subsumes N-Triples.
-/// The IRI-vs-element test is the `://` scheme separator — both syntaxes open with `<`.
+/// The IRI-vs-element test is [`angle_token_is_iri`] — both syntaxes open with `<`.
 fn sniff(bytes: &[u8]) -> RdfFormat {
     let rest = &bytes[bytes.iter().take_while(|b| b.is_ascii_whitespace()).count()..];
     match rest.first() {
         Some(b'{') | Some(b'[') => json_ld(),
-        Some(b'<') => {
-            // The first `<…>` token: an IRI carries a `://` scheme separator; an XML
-            // element tag does not.
-            let token = rest
-                .iter()
-                .take_while(|&&b| b != b'>' && !b.is_ascii_whitespace())
-                .copied()
-                .collect::<Vec<u8>>();
-            if token.windows(3).any(|w| w == b"://") {
-                RdfFormat::Turtle
-            } else {
-                RdfFormat::RdfXml
-            }
-        }
+        Some(b'<') if angle_token_is_iri(rest) => RdfFormat::Turtle,
+        Some(b'<') => RdfFormat::RdfXml,
         _ => RdfFormat::Turtle,
     }
+}
+
+/// How many opening bytes the `<…>` test scans for the closing bracket.
+const ANGLE_SCAN: usize = 2048;
+
+/// For a leading `<…>` token, whether it is a Turtle/N-Triples IRI subject rather than an
+/// XML start tag — the whole of the distinction, since both syntaxes open with `<`.
+///
+/// The test used to be "does the token contain `://`?", which asks about an *authority*,
+/// not a scheme — so every `urn:` IRI (the scheme ikigai names all of its resources with)
+/// read as an element tag, and a Turtle document went to the RDF/XML parser to die as
+/// `Unknown prefix urn:`. Three cheap signals replace it, all on the bracketed token:
+///
+/// 1. it closes within the scan window with no character Turtle's `IRIREF` production
+///    forbids before the `>` — which rules out every start tag carrying attributes, plus
+///    `<?xml …?>` and `<!DOCTYPE …>`;
+/// 2. the text before its first `:` is a URI scheme ([`is_uri_scheme`]) with something
+///    after the colon — `<doc>` and `<html>` carry no scheme at all;
+/// 3. it is not *also* a well-formed XML QName ([`is_xml_qname`]). This is the tie-break
+///    `://` was standing in for: an XML name admits only letters, digits, `.`, `-`, `_`
+///    and the one prefix colon, so an attribute-less `<rdf:RDF>` satisfies (1) and (2) and
+///    is resolved as markup, while `urn:demo:a`'s second colon and `http://ex/a`'s slashes
+///    cannot occur in one.
+///
+/// The residue is a single-colon, all-name-character IRI such as `<urn:x>`, which reads as
+/// a tag: nothing in the token separates the two shapes, and ikigai's own URNs are
+/// `urn:nid:nss`. Kept in step with the copies in `ikigai-sniff` and `ikigai-sparql`.
+fn angle_token_is_iri(rest: &[u8]) -> bool {
+    let window = &rest[1..rest.len().min(ANGLE_SCAN)];
+    let Some(end) = window.iter().position(|&b| b == b'>') else {
+        return false; // unterminated within the window: not an IRI reference
+    };
+    let token = &window[..end];
+    if !token.iter().all(|&b| is_iri_char(b)) {
+        return false;
+    }
+    let Some(colon) = token.iter().position(|&b| b == b':') else {
+        return false;
+    };
+    let (scheme, after_scheme) = token.split_at(colon);
+    is_uri_scheme(scheme) && after_scheme.len() > 1 && !is_xml_qname(token)
+}
+
+/// Whether a byte may appear inside a Turtle `IRIREF`. The production excludes the ASCII
+/// control range, the space, and ``"<>\^`{|}`` — the same set RFC 3987 keeps out of an IRI.
+/// (A single quote is *not* excluded; an attribute written with them, `xmlns='…'`, is
+/// caught by the space in front of it.)
+fn is_iri_char(b: u8) -> bool {
+    !(b <= 0x20
+        || b == 0x7F
+        || matches!(
+            b,
+            b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}'
+        ))
+}
+
+/// Whether the bytes are a URI scheme: `[A-Za-z][A-Za-z0-9+.-]*` (RFC 3986 §3.1).
+fn is_uri_scheme(bytes: &[u8]) -> bool {
+    matches!(bytes.first(), Some(b) if b.is_ascii_alphabetic())
+        && bytes[1..]
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+}
+
+/// Whether the token is *also* a well-formed XML QName — `prefix:local`, where both parts
+/// are XML names — which is the shape an RDF/XML root tag takes when it carries no
+/// attributes (`<rdf:RDF>`). ASCII-only: a non-ASCII name character puts the token outside
+/// the overlap this has to arbitrate, and [`is_iri_char`] has already admitted it.
+fn is_xml_qname(token: &[u8]) -> bool {
+    token.iter().filter(|&&b| b == b':').count() == 1
+        && token
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
 }
 
 /// Map an `as` value — a media type (with optional params) or a short alias — to an
@@ -617,6 +678,59 @@ foaf:Person foaf:name "ignored" ."#;
         assert!(html.contains("2 triples"));
         assert!(html.contains("http://example.org/me"));
         assert!(html.contains("&lt;") || html.contains("Ada")); // escaped / literal present
+    }
+
+    /// A graph named entirely in `urn:` — the shape every ikigai resource takes.
+    const URN_TTL: &str = "<urn:demo:a> <urn:demo:p> <urn:demo:b> .\n\
+                           <urn:demo:a> <urn:demo:q> \"lit\" .\n";
+
+    #[test]
+    fn a_urn_subject_is_sniffed_as_turtle_not_rdfxml() {
+        // The regression: `urn:` has no authority, so the old `://` discriminator read
+        // `<urn:demo:a>` as an XML tag and handed Turtle to the RDF/XML parser, which
+        // failed with `Unknown prefix urn:` — an XML error raised from a Turtle document.
+        assert_eq!(sniff(URN_TTL.as_bytes()), RdfFormat::Turtle);
+        assert_eq!(sniff(b"<http://ex/a> <http://ex/p> 1 ."), RdfFormat::Turtle);
+        assert_eq!(
+            sniff(b"<mailto:ada@ex.org> <urn:demo:p> 1 ."),
+            RdfFormat::Turtle
+        );
+        // Markup still sniffs as markup, attributes or not.
+        assert_eq!(
+            sniff(br#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"/>"#),
+            RdfFormat::RdfXml
+        );
+        assert_eq!(sniff(b"<rdf:RDF></rdf:RDF>"), RdfFormat::RdfXml);
+        assert_eq!(
+            sniff(br#"<?xml version="1.0"?><rdf:RDF/>"#),
+            RdfFormat::RdfXml
+        );
+    }
+
+    #[test]
+    fn a_urn_only_graph_round_trips_through_every_syntax() {
+        // End to end, not just the sniff: `source urn:<a graph> | urn:rdf:transrept` is
+        // the call the bug broke, and re-sniffing each intermediate is what makes it a
+        // round trip rather than a one-way serialization.
+        let canonical = body(URN_TTL, "application/n-triples");
+        assert!(canonical.contains("<urn:demo:a> <urn:demo:p> <urn:demo:b>"));
+        for via in ["application/rdf+xml", "application/ld+json", "text/turtle"] {
+            let back = body(&body(URN_TTL, via), "application/n-triples");
+            let set = |s: &str| {
+                let mut v: Vec<String> = s
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(str::to_string)
+                    .collect();
+                v.sort();
+                v
+            };
+            assert_eq!(
+                set(&canonical),
+                set(&back),
+                "round-trip via {via} lost data"
+            );
+        }
     }
 
     #[test]

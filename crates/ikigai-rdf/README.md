@@ -19,8 +19,11 @@ compiles to `wasm32` and the browser can transrept a fetched graph **client-side
 | | `as` | target representation (default `text/turtle`) |
 
 The input syntax is sniffed from its opening tokens (`{`/`[` → JSON-LD; a leading
-`<scheme://…>` IRI → Turtle/N-Triples; a leading XML element → RDF/XML; otherwise Turtle),
-so an explicit input format isn't needed for the common cases.
+`<scheme:…>` IRI → Turtle/N-Triples; a leading XML element → RDF/XML; otherwise Turtle),
+so an explicit input format isn't needed for the common cases. Turtle and XML both open
+with `<`, and the IRI is recognized by its shape — it closes with no whitespace, quote or
+`<` inside it, leads with a URI scheme, and is not a bare XML QName like `<rdf:RDF>` — so
+an authority-less scheme (`<urn:…>`, `<mailto:…>`, `<did:…>`) sniffs as Turtle.
 
 ### `as` targets
 
