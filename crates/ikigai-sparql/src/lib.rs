@@ -318,10 +318,7 @@ impl Endpoint for SparqlEndpoint {
             }
             let results = evaluate(query_str, store)?;
             let (media, bytes) = serialize_results(results, inv.inline_str("as").ok())?;
-            return Ok(Representation::new(
-                ReprType::new(&media).with_param("charset", "utf-8"),
-                bytes,
-            ));
+            return Ok(Representation::new(utf8_repr(&media), bytes));
         }
 
         // `graph=` is optional: the vocabulary graph (below) is always present, so a query
@@ -353,10 +350,7 @@ impl Endpoint for SparqlEndpoint {
 
         let results = evaluate(query_str, &store)?;
         let (media, bytes) = serialize_results(results, inv.inline_str("as").ok())?;
-        Ok(
-            Representation::new(ReprType::new(&media).with_param("charset", "utf-8"), bytes)
-                .cacheable(),
-        )
+        Ok(Representation::new(utf8_repr(&media), bytes).cacheable())
     }
 
     fn name(&self) -> &str {
@@ -720,6 +714,34 @@ fn media_base(media: &str) -> &str {
     media.split(';').next().unwrap_or(media).trim()
 }
 
+/// The representation type for a serializer's media type: the bare type, its parameters
+/// carried as *parameters*, and UTF-8 — with nothing written twice.
+///
+/// ⚠ **A serializer's `media_type()` is not necessarily bare, and `ReprType::new` stores
+/// whatever it is handed verbatim.** `sparesults` returns `text/csv; charset=utf-8` and
+/// `text/tab-separated-values; charset=utf-8` for CSV and TSV while `Xml`/`Json` carry no
+/// parameter at all, so the obvious `ReprType::new(fmt.media_type()).with_param("charset",
+/// "utf-8")` canonicalized a CSV answer to `text/csv; charset=utf-8;charset=utf-8` — a
+/// media type no consumer matching it against the declared `text/csv` can recognize, and
+/// one that every tolerant comparison around it was blind to (this crate's `media_base`
+/// splits at the first `;`; ikigai-conformance's OUTPUTS check strips `;charset=`).
+/// Splitting the parameters off and setting them where they belong makes appending
+/// `charset` replace an equal value instead of adding a second one.
+fn utf8_repr(media: &str) -> ReprType {
+    let mut repr = ReprType::new(media_base(media));
+    for param in media.split(';').skip(1) {
+        if let Some((key, value)) = param.split_once('=') {
+            repr = repr.with_param(
+                key.trim().to_ascii_lowercase(),
+                value.trim().trim_matches('"'),
+            );
+        }
+    }
+    // Everything this crate serializes is UTF-8; a format that already said so re-sets the
+    // same value rather than adding a second one.
+    repr.with_param("charset", "utf-8")
+}
+
 /// Sniff an input graph's syntax when its content-type isn't a known RDF media type:
 /// `{`/`[` ⇒ JSON-LD; a leading IRI `<scheme:…>` ⇒ Turtle; a leading XML element ⇒
 /// RDF/XML; else Turtle (subsumes N-Triples). Same discriminator as ikigai-rdf.
@@ -1074,6 +1096,89 @@ mod tests {
             ),
             GRAPH_OUTPUTS[0]
         );
+    }
+
+    #[test]
+    fn the_served_repr_type_is_exactly_the_declared_output() {
+        // ⚠ **The tolerant comparison must not be the only one.** Every other check around
+        // this one compares media types loosely, and each for a good reason —
+        // `every_declared_output_is_actually_servable` goes through `media_base` (it asks
+        // "which format", not "which exact string"), and ikigai-conformance's OUTPUTS walk
+        // strips `;charset=` (a served type legitimately carries a charset a declaration
+        // does not). Together those tolerances hid a CSV answer served as
+        // `text/csv; charset=utf-8;charset=utf-8` for as long as CSV has been declared. A
+        // consumer matching `repr_type.media_type` against a declared output — the ordinary
+        // way to consume a declaration — gets no tolerance at all, so this test has none
+        // either: both spaces, every declared output, string equality.
+        use futures::executor::block_on;
+        use ikigai_core::{Capability, Kernel};
+
+        const SELECT: &str = "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1";
+        const CONSTRUCT: &str = "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o } LIMIT 1";
+
+        for (which, space) in [
+            ("space", space()),
+            (
+                "space_with_store",
+                space_with_store(Arc::new(Store::new().unwrap())),
+            ),
+        ] {
+            let kernel = Kernel::new(Arc::new(space));
+            for (iri, query, declared) in [
+                ("urn:sparql:select", SELECT, &RESULTS_OUTPUTS[..]),
+                ("urn:sparql:construct", CONSTRUCT, &GRAPH_OUTPUTS[..]),
+            ] {
+                for media in declared {
+                    let request = Request::new(Verb::Source, Iri::parse(iri).unwrap())
+                        .with_arg("query", ArgRef::Inline(query.as_bytes().to_vec()))
+                        .with_arg("as", ArgRef::Inline(media.as_bytes().to_vec()));
+                    let repr = block_on(kernel.issue(request, &Capability::root()))
+                        .unwrap_or_else(|e| panic!("{which} {iri} as={media}: {e}"));
+                    assert_eq!(
+                        repr.repr_type.media_type, *media,
+                        "{which} {iri}: the served media type must BE the declared string"
+                    );
+                    assert_eq!(
+                        repr.repr_type.canonical(),
+                        format!("{media};charset=utf-8"),
+                        "{which} {iri}: one charset, and only the declared type before it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_format_that_carries_its_own_charset_is_not_given_a_second_one() {
+        // The unit-level statement of the same thing, against the upstream strings that
+        // caused it: `sparesults` parameterizes CSV and TSV and leaves XML and JSON bare,
+        // so a helper that assumes either shape is wrong for half the formats.
+        assert_eq!(
+            QueryResultsFormat::Csv.media_type(),
+            "text/csv; charset=utf-8"
+        );
+        assert_eq!(
+            QueryResultsFormat::Json.media_type(),
+            "application/sparql-results+json"
+        );
+        for format in [
+            QueryResultsFormat::Json,
+            QueryResultsFormat::Xml,
+            QueryResultsFormat::Csv,
+            QueryResultsFormat::Tsv,
+        ] {
+            let repr = utf8_repr(format.media_type());
+            assert_eq!(repr.media_type, media_base(format.media_type()));
+            assert_eq!(
+                repr.params.get("charset").map(String::as_str),
+                Some("utf-8")
+            );
+            assert_eq!(
+                repr.canonical(),
+                format!("{};charset=utf-8", media_base(format.media_type())),
+                "{format:?}"
+            );
+        }
     }
 
     #[test]
