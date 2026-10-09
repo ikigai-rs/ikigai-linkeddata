@@ -29,6 +29,7 @@ distinct, discoverable IRIs. Each accepts the same arguments:
 | `query` | the SPARQL query |
 | `graph` | one or more graph source IRIs, comma- or space-separated; each resolved **through the kernel** and loaded as a named graph |
 | `as` | result representation (see below) |
+| `budget` | optional: milliseconds; can only **lower** the space's time budget (see [Time budget](#time-budget)) |
 
 ### `as` representations
 
@@ -126,6 +127,7 @@ source urn:fs:file path=migrate.ru | urn:sparql:update
 | --- | --- |
 | `update` | the SPARQL UPDATE text |
 | `content` | the same text, piped — one of the two must be present |
+| `budget` | optional: milliseconds; can only lower the space's time budget |
 
 - **Capability-gated on `urn:cap:sparql:update`**, declared and therefore enforced by the
   kernel before the endpoint runs. ⚠ **That scope is coarse and it is the keys to the
@@ -218,10 +220,7 @@ and refuses on the deeper (`src/limits.rs` has the argument).
   per level, so a long enough operator chain can still overflow a debug host. The nesting
   bound holds in both.
 - **On wasm there are no threads**, so only the two bounds apply.
-- **It does not bound time.** The evaluator is quadratic in an operator chain, and worse on
-  some shapes: on the per-query dataset, a 5,000-step property path (15 KB) ran for more
-  than ten minutes of a core and 2,000 triple patterns for more than a minute, without
-  finishing. A host that runs untrusted queries needs its own budget.
+- **It does not bound time.** That is the [time budget](#time-budget)'s job, below.
 - **The bounds are constants, not configuration.** They protect the process, not a policy.
   A host with its own SPARQL face over oxigraph can apply the same bound with
   `ikigai_sparql::limits::check_sparql`, and must parse on `limits::on_sparql_stack`.
@@ -231,6 +230,84 @@ byte-for-byte except where marked, until a shared crate replaces both.
 `tests/sparql_nesting.rs` reproduces the abort in a child process on a 2 MiB thread at all
 nine doors (it fails, with the child killed by `SIGABRT`, against 0.1.10);
 `tests/sparql_stack_measure.rs` re-measures the stack each shape costs when oxigraph moves.
+
+## Time budget
+
+Through 0.1.11 nothing bounded how long a query ran, and oxigraph is slow well before it is
+deep. Measured with oxigraph 0.5.11 in a release build: a 1,000-step property path (3 KB)
+took 19 s of a core, 200 triple patterns 7 s, a 5,000-step path more than ten minutes, and a
+50-byte cross product of the always-loaded vocabulary (`SELECT * { ?a ?b ?c . ?d ?e ?f . ?g
+?h ?i }`) runs until it is killed. Through an anonymous `urn:sparql:select` door, one request
+could pin a core for as long as it liked.
+
+Every evaluation at all nine doors now runs under a **time budget**, in two layers:
+
+| bound | value | what it stops |
+| --- | --- | --- |
+| the budget | 5 s by default (`budget::DEFAULT_BUDGET`), set by the host | evaluation and serialization, stopped at the deadline and refused as a `timeout` |
+| `budget::MAX_JOIN_OPERANDS` | 32 | a join with more triple patterns, path steps and nested groups, refused after parsing, before planning |
+| `budget::MAX_ALGEBRA_NODES` | 1024 | a query or update with more operators (patterns, `OPTIONAL`/`UNION`/`FILTER`/`BIND`, path and expression operators) |
+
+- **The deadline** is oxigraph's `CancellationToken`, cancelled by a watchdog thread when the
+  budget expires; the crate's own serialization loop checks it once per row or triple. A query
+  that crosses the deadline is refused with `Error::Timeout` naming the budget — **never a
+  partial answer** — and the evaluation thread has returned before the caller hears it, so
+  the core is free (the tests measure the process's CPU while idle afterwards).
+- **The algebra bounds exist because oxigraph's planner cannot be cancelled.** The token is
+  checked only where the evaluator touches the dataset, and the planner touches none: its join
+  ordering is about cubic in one join's operands, and `OPTIONAL` and operator chains are
+  quadratic. A 1,000-step path cancelled after 0.5 s returned 18 s later. So the shapes the
+  planner is slow in are refused by size, at once, with an `InvalidArgument` naming the
+  bound. Constants cost nothing: `VALUES` rows, constant `IN (…)` members and `INSERT DATA`
+  quads are not counted, and neither are variables, IRIs or literals. Inside both bounds the
+  slowest plan measured is ~125 ms.
+- **The evidence for the numbers.** The largest query the ecosystem runs (a survey of every
+  repo) joins 11 patterns and has about 60 operators. The heaviest by data, the reading room's
+  book `CONSTRUCT` over its 4.4 MB Zotero export (65,607 quads in, 11,445 triples out),
+  evaluates and serializes in 18 ms. The default budget is over 250 times that.
+  `tests/sparql_time_measure.rs` re-measures every number here when oxigraph moves.
+
+### How a host sets it
+
+The caller can only make the budget smaller; the host decides how large it may be.
+
+```rust
+use std::time::Duration;
+
+// The ceiling: no evaluation in this space runs longer.
+let space = ikigai_sparql::space_with_budget(Duration::from_secs(2));
+let shared = ikigai_sparql::space_with_store_and_budget(store, Duration::from_secs(2));
+// `space()` and `space_with_store()` take budget::DEFAULT_BUDGET (5 s).
+```
+
+A request may carry `budget=<milliseconds>`, and the budget that applies is the **smaller** of
+that and the ceiling: asking for an hour gets the ceiling. So a host whose anonymous door
+shares a kernel with trusted callers **stamps** a small `budget=` (1,000 ms is still 50 times
+the heaviest legitimate query) on every request that door forwards, overwriting any the
+caller sent. A budget that is not a positive whole number of milliseconds is refused.
+
+### Updates
+
+A `urn:sparql:update` the deadline stops was cancelled **inside its transaction**, which is
+never committed: the store is exactly as it was, every operation of a `;`-separated update
+included, and the refusal says `nothing was applied`. An update that finishes after its
+deadline anyway (in a part the token does not reach) has been committed, and is reported as
+applied — never as a timeout for a write that happened.
+
+### What the budget does not cover
+
+- **Planning, inside the algebra bounds**: up to ~125 ms measured, before the first check.
+- **Work between two dataset touches in an operator that consumes its input before yielding**
+  — an aggregate, `ORDER BY`, the build side of a join. oxigraph's join iterators combine
+  in-memory tuples without checking the token, so a `COUNT(*)` over a four-way cross product of
+  470 triples ran 4 s past its cancellation. The same product WITHOUT the aggregate stops at
+  the deadline, because its rows reach the crate's serializer. Closing this needs oxigraph to
+  check the token in those loops.
+- **The size of an answer.** The budget bounds how long rows are produced, not how many: a
+  cross product serializes millions of rows a second into memory until the deadline.
+- **Resolving `graph=` sources**, which are other endpoints' requests under their own
+  policies; the budget starts when parsing starts.
+- **wasm**, which has no threads: no watchdog runs there, and only the algebra bounds apply.
 
 ## Conformance
 

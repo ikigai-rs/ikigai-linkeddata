@@ -40,9 +40,19 @@
 //! parses caller text refuses one over [`limits::MAX_SPARQL_BYTES`] or nested deeper than
 //! [`limits::MAX_SPARQL_NESTING`], and parses, evaluates and serializes the rest on a thread
 //! whose stack is sized from the text ([`limits::on_sparql_stack`]). See [`limits`].
+//!
+//! **And every evaluation runs under a TIME budget** (ledger #964). A watchdog cancels
+//! oxigraph's [`budget::CancellationToken`] when the budget expires, the serialization loop
+//! checks it once per row, and a query that crosses its deadline is refused with
+//! [`Error::Timeout`]. oxigraph's query planner cannot be cancelled and is super-linear, so a
+//! parsed query is also refused when its algebra exceeds [`budget::MAX_JOIN_OPERANDS`] or
+//! [`budget::MAX_ALGEBRA_NODES`]. The host sets the budget's ceiling when it builds the space
+//! ([`space_with_budget`], [`space_with_store_and_budget`]); a request's `budget=` can only
+//! lower it. See [`budget`] for what it does not cover.
 
 #![forbid(unsafe_code)]
 
+pub mod budget;
 pub mod limits;
 
 use async_trait::async_trait;
@@ -53,8 +63,10 @@ use ikigai_core::{
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::{GraphName, NamedNodeRef};
 use oxigraph::sparql::results::{QueryResultsFormat, QueryResultsSerializer};
-use oxigraph::sparql::{QueryResults, SparqlEvaluator};
+use oxigraph::sparql::{CancellationToken, QueryResults, SparqlEvaluator};
+use spargebra::SparqlParser;
 use std::sync::Arc;
+use std::time::Duration;
 
 // Re-exported so downstream hosts can name ONE canonical store type: the
 // `Arc<Store>` a host hands to `space_with_store` must be the *same* `Store` type
@@ -75,7 +87,17 @@ pub use oxigraph::store::Store;
 /// thrown away microseconds later: a silent no-op wearing the costume of a write. Leaving
 /// the IRI unbound turns that into an honest `Error::Unresolved` at the kernel, and keeps
 /// the action manifold from offering something that can never take effect.
+///
+/// Every evaluation runs under [`budget::DEFAULT_BUDGET`]; [`space_with_budget`] sets another.
 pub fn space() -> EndpointSpace {
+    space_with_budget(budget::DEFAULT_BUDGET)
+}
+
+/// [`space`] with a time budget `ceiling` other than [`budget::DEFAULT_BUDGET`]: no query
+/// these endpoints evaluate runs longer, and a request's `budget=` milliseconds can only
+/// lower it (see [`budget::effective_budget`]). A host serving anonymous callers builds its
+/// space with a ceiling it can afford, or stamps a small `budget=` at that door.
+pub fn space_with_budget(ceiling: Duration) -> EndpointSpace {
     let mut space = EndpointSpace::new();
     for (verb, id) in FORMS {
         space = space.bind(
@@ -84,6 +106,7 @@ pub fn space() -> EndpointSpace {
                 verb,
                 id,
                 shared: None,
+                ceiling,
             },
         );
     }
@@ -133,7 +156,16 @@ pub fn space() -> EndpointSpace {
 ///   `Expiry::Always`. The flip is one line the day every writer to a given store
 ///   goes through the kernel, or a freshness watcher cuts [`UPDATE_THREAD`] on any
 ///   change to it.
+///
+/// Every evaluation, the update's included, runs under [`budget::DEFAULT_BUDGET`];
+/// [`space_with_store_and_budget`] sets another.
 pub fn space_with_store(store: Arc<Store>) -> EndpointSpace {
+    space_with_store_and_budget(store, budget::DEFAULT_BUDGET)
+}
+
+/// [`space_with_store`] with a time budget `ceiling` other than [`budget::DEFAULT_BUDGET`],
+/// for all five endpoints. A request's `budget=` milliseconds can only lower it.
+pub fn space_with_store_and_budget(store: Arc<Store>, ceiling: Duration) -> EndpointSpace {
     let mut space = EndpointSpace::new();
     for (verb, id) in FORMS {
         space = space.bind(
@@ -142,6 +174,7 @@ pub fn space_with_store(store: Arc<Store>) -> EndpointSpace {
                 verb,
                 id,
                 shared: Some(Arc::clone(&store)),
+                ceiling,
             },
         );
     }
@@ -149,7 +182,7 @@ pub fn space_with_store(store: Arc<Store>) -> EndpointSpace {
     // only the shared store is durable (see [`space`]).
     space.bind(
         Exact::new("urn:sparql:update"),
-        SparqlUpdateEndpoint { store },
+        SparqlUpdateEndpoint { store, ceiling },
     )
 }
 
@@ -233,6 +266,9 @@ pub const UPDATE_THREAD: &str = "urn:sparql:update";
 /// that is a string and not `xsd:anyURI`).
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 
+/// The XSD `positiveInteger` datatype IRI — the `class` of `budget=` (milliseconds).
+const XSD_POSITIVE_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#positiveInteger";
+
 /// What SELECT and ASK serialize as — the SPARQL 1.1 results formats `as=` selects.
 /// The first is the default.
 const RESULTS_OUTPUTS: [&str; 4] = [
@@ -303,6 +339,8 @@ struct SparqlEndpoint {
     /// `Some` = the shared-store variant ([`space_with_store`]): query the given live
     /// store, uncacheable, no `graph=`. `None` = the classic per-query dataset.
     shared: Option<Arc<Store>>,
+    /// The most time one evaluation may take; a request's `budget=` can only lower it.
+    ceiling: Duration,
 }
 
 #[async_trait]
@@ -314,6 +352,7 @@ impl Endpoint for SparqlEndpoint {
         // Before anything else, `graph=` sources included: a text the parser cannot be
         // trusted with is refused without costing a single resolution (ledger #962).
         limits::check_sparql(query_str, "query")?;
+        let budget = budget::effective_budget(inv.inline_str("budget").ok(), self.ceiling)?;
         let as_type = inv.inline_str("as").ok();
 
         // The shared-store variant: run the query over the caller-owned live store.
@@ -328,7 +367,7 @@ impl Endpoint for SparqlEndpoint {
                         .to_string(),
                 ));
             }
-            let (media, bytes) = query_on_sized_stack(query_str, store, as_type)?;
+            let (media, bytes) = query_within_budget(query_str, store, as_type, budget)?;
             return Ok(Representation::new(utf8_repr(&media), bytes));
         }
 
@@ -359,7 +398,7 @@ impl Endpoint for SparqlEndpoint {
                 .map_err(|e| Error::Endpoint(format!("loading <{uri}>: {e}")))?;
         }
 
-        let (media, bytes) = query_on_sized_stack(query_str, &store, as_type)?;
+        let (media, bytes) = query_within_budget(query_str, &store, as_type, budget)?;
         Ok(Representation::new(utf8_repr(&media), bytes).cacheable())
     }
 
@@ -412,7 +451,7 @@ impl Endpoint for SparqlEndpoint {
                     .optional(),
             )
         };
-        let desc = desc.input(
+        let desc = desc.input(budget_arg(self.ceiling)).input(
             ArgSpec::new("as")
                 .summary(
                     "result representation: SELECT/ASK → application/sparql-results+json \
@@ -469,6 +508,8 @@ impl Endpoint for SparqlEndpoint {
 /// cuts [`UPDATE_THREAD`] on success.
 struct SparqlUpdateEndpoint {
     store: Arc<Store>,
+    /// The most time one update may take; a request's `budget=` can only lower it.
+    ceiling: Duration,
 }
 
 #[async_trait]
@@ -506,6 +547,7 @@ impl Endpoint for SparqlUpdateEndpoint {
             "content"
         };
         limits::check_sparql(update_str, arg)?;
+        let budget = budget::effective_budget(inv.inline_str("budget").ok(), self.ceiling)?;
 
         let before = self
             .store
@@ -516,16 +558,35 @@ impl Endpoint for SparqlUpdateEndpoint {
         // evaluated as recursively as a query's. `on_store` opens a transaction and
         // `execute` commits it only after every operation succeeds — so a syntax error
         // applies nothing, and a multi-operation update that fails halfway rolls the whole
-        // thing back.
-        limits::on_sparql_stack(update_str, || {
-            let prepared = SparqlEvaluator::new()
-                .parse_update(update_str)
-                .map_err(|e| Error::Endpoint(format!("SPARQL UPDATE syntax error: {e}")))?;
-            prepared
-                .on_store(&self.store)
-                .execute()
-                .map_err(|e| Error::Endpoint(format!("update evaluation error: {e}")))
+        // thing back. A cancellation at the deadline is one such failure, which is what makes
+        // a timed-out update leave the store exactly as it was.
+        let (applied, fired) = budget::with_deadline(budget, |token| {
+            limits::on_sparql_stack(update_str, || {
+                let update = SparqlParser::new()
+                    .parse_update(update_str)
+                    .map_err(|e| Error::Endpoint(format!("SPARQL UPDATE syntax error: {e}")))?;
+                budget::check_update(&update, arg)?;
+                SparqlEvaluator::new()
+                    .with_cancellation_token(token.clone())
+                    .for_update(update)
+                    .on_store(&self.store)
+                    .execute()
+                    .map_err(|e| Error::Endpoint(format!("update evaluation error: {e}")))
+            })
         })?;
+        match applied {
+            // The deadline fired and the update failed: it was cancelled, and its transaction
+            // was never committed. Say so, rather than the evaluator's "unexpected" error.
+            Err(_) if fired => {
+                return Err(budget::timeout(
+                    budget,
+                    "this SPARQL update (nothing was applied: the transaction was not committed)",
+                ))
+            }
+            // An update that finished anyway is COMMITTED, however late: refusing it now would
+            // report a write that happened as one that did not.
+            other => other?,
+        }
 
         let after = self
             .store
@@ -580,6 +641,7 @@ impl Endpoint for SparqlUpdateEndpoint {
                     .class(XSD_STRING)
                     .optional(),
             )
+            .input(budget_arg(self.ceiling))
             .output("text/plain;charset=utf-8")
     }
 }
@@ -601,27 +663,62 @@ async fn resolve_graph(inv: &Invocation<'_>, uri: &str) -> Result<Representation
     }
 }
 
+/// The `budget=` argument every endpoint declares: milliseconds, at most the space's ceiling.
+fn budget_arg(ceiling: Duration) -> ArgSpec {
+    ArgSpec::new("budget")
+        .summary(format!(
+            "optional: the most milliseconds this evaluation may take before it is stopped and \
+             refused as a timeout. It can only LOWER this space's budget ({} ms), never raise \
+             it; a host serving anonymous callers stamps a small one at that door",
+            ceiling.as_millis()
+        ))
+        .class(XSD_POSITIVE_INTEGER)
+        .optional()
+}
+
 /// Parse, evaluate and serialize `query_str` over `store` on a thread whose stack is sized
-/// for the text ([`limits::on_sparql_stack`]). All three steps recurse, and evaluation is
-/// lazy — rows are produced while they are serialized — so all three run there. The caller
-/// has already passed the text through [`limits::check_sparql`].
-fn query_on_sized_stack(
+/// for the text ([`limits::on_sparql_stack`]), within `budget`. All three steps recurse, and
+/// evaluation is lazy — rows are produced while they are serialized — so all three run there,
+/// under one deadline. The caller has already passed the text through
+/// [`limits::check_sparql`].
+///
+/// A query the deadline catches is refused whatever it returned: it either stopped part-way
+/// (and a partial answer is not an answer) or finished late, past a bound that refuses.
+fn query_within_budget(
     query_str: &str,
     store: &Store,
     as_type: Option<&str>,
+    budget: Duration,
 ) -> Result<(String, Vec<u8>)> {
-    limits::on_sparql_stack(query_str, || {
-        serialize_results(evaluate(query_str, store)?, as_type)
-    })
+    let (answer, fired) = budget::with_deadline(budget, |token| {
+        limits::on_sparql_stack(query_str, || {
+            serialize_results(evaluate(query_str, store, token)?, as_type, token)
+        })
+    })?;
+    if fired {
+        return Err(budget::timeout(budget, "this SPARQL query"));
+    }
+    answer
 }
 
 /// Parse and run a query over `store` with the default graph set to the union of all
 /// its graphs — so a query without an explicit `GRAPH`/`FROM` spans every graph, and
 /// `GRAPH <uri> { … }` still addresses one. Both variants share these semantics.
-fn evaluate<'a>(query_str: &str, store: &'a Store) -> Result<QueryResults<'a>> {
-    let mut prepared = SparqlEvaluator::new()
+///
+/// Parsed with spargebra directly, so the algebra can be measured against the budget's
+/// bounds BEFORE oxigraph plans it: planning cannot be cancelled (see [`budget`]).
+fn evaluate<'a>(
+    query_str: &str,
+    store: &'a Store,
+    token: &CancellationToken,
+) -> Result<QueryResults<'a>> {
+    let query = SparqlParser::new()
         .parse_query(query_str)
         .map_err(|e| Error::Endpoint(format!("SPARQL syntax error: {e}")))?;
+    budget::check_query(&query, "query")?;
+    let mut prepared = SparqlEvaluator::new()
+        .with_cancellation_token(token.clone())
+        .for_query(query);
     prepared.dataset_mut().set_default_graph_as_union();
     prepared
         .on_store(store)
@@ -629,8 +726,20 @@ fn evaluate<'a>(query_str: &str, store: &'a Store) -> Result<QueryResults<'a>> {
         .map_err(|e| Error::Endpoint(format!("query evaluation error: {e}")))
 }
 
-/// Serialize query results by their kind, honoring the `as` representation.
-fn serialize_results(results: QueryResults, as_type: Option<&str>) -> Result<(String, Vec<u8>)> {
+/// What a serialization loop returns when the deadline has passed. The caller sees the
+/// [`budget::timeout`] that [`query_within_budget`] makes of it, never this.
+fn stopped() -> Error {
+    Error::Endpoint("stopped at the time budget's deadline".to_string())
+}
+
+/// Serialize query results by their kind, honoring the `as` representation, checking the
+/// budget's `token` once per row or triple: oxigraph checks it only where it touches the
+/// dataset, and a join can produce many rows between two touches.
+fn serialize_results(
+    results: QueryResults,
+    as_type: Option<&str>,
+    token: &CancellationToken,
+) -> Result<(String, Vec<u8>)> {
     let io = |e: std::io::Error| Error::Endpoint(format!("serialize: {e}"));
     match results {
         QueryResults::Solutions(solutions) => {
@@ -640,6 +749,9 @@ fn serialize_results(results: QueryResults, as_type: Option<&str>) -> Result<(St
                 .serialize_solutions_to_writer(Vec::new(), variables)
                 .map_err(io)?;
             for solution in solutions {
+                if token.is_cancelled() {
+                    return Err(stopped());
+                }
                 let solution = solution.map_err(|e| Error::Endpoint(format!("query: {e}")))?;
                 serializer.serialize(&solution).map_err(io)?;
             }
@@ -659,6 +771,9 @@ fn serialize_results(results: QueryResults, as_type: Option<&str>) -> Result<(St
             let format = graph_format_or_default(as_type)?;
             let mut serializer = RdfSerializer::from_format(format).for_writer(Vec::new());
             for triple in triples {
+                if token.is_cancelled() {
+                    return Err(stopped());
+                }
                 let triple = triple.map_err(|e| Error::Endpoint(format!("query: {e}")))?;
                 serializer
                     .serialize_quad(&triple.in_graph(GraphName::DefaultGraph))
@@ -887,8 +1002,9 @@ mod tests {
                 )
                 .unwrap();
         }
-        let results = evaluate(query, &store).unwrap();
-        let (media, bytes) = serialize_results(results, as_type).unwrap();
+        let token = CancellationToken::new();
+        let results = evaluate(query, &store, &token).unwrap();
+        let (media, bytes) = serialize_results(results, as_type, &token).unwrap();
         (media, String::from_utf8(bytes).unwrap())
     }
 
@@ -928,13 +1044,48 @@ mod tests {
                 ttl.as_bytes(),
             )
             .unwrap();
+        let token = CancellationToken::new();
         let results = evaluate(
             "SELECT ?o WHERE { GRAPH <urn:demo:graph> { <urn:demo:a> <urn:demo:p> ?o } }",
             &store,
+            &token,
         )
         .unwrap();
-        let (_, bytes) = serialize_results(results, Some("text/csv")).unwrap();
+        let (_, bytes) = serialize_results(results, Some("text/csv"), &token).unwrap();
         assert!(String::from_utf8(bytes).unwrap().contains("Ada"));
+    }
+
+    /// All five endpoints offer `budget=`: optional, typed, and saying in its summary that it
+    /// can only lower the space's ceiling (ledger #964).
+    #[test]
+    fn every_endpoint_declares_an_optional_budget() {
+        let store = Arc::new(Store::new().unwrap());
+        let ceiling = Duration::from_millis(1234);
+        let mut descriptions: Vec<Description> = FORMS
+            .iter()
+            .flat_map(|(verb, id)| {
+                [None, Some(Arc::clone(&store))].map(|shared| {
+                    SparqlEndpoint {
+                        verb,
+                        id,
+                        shared,
+                        ceiling,
+                    }
+                    .describe()
+                })
+            })
+            .collect();
+        descriptions.push(SparqlUpdateEndpoint { store, ceiling }.describe());
+        for desc in descriptions {
+            let arg = desc
+                .inputs
+                .iter()
+                .find(|a| a.name == "budget")
+                .unwrap_or_else(|| panic!("{} offers no budget=", desc.id));
+            assert!(!arg.required, "{}", desc.id);
+            assert_eq!(arg.class.as_deref(), Some(XSD_POSITIVE_INTEGER));
+            assert!(arg.summary.contains("1234 ms"), "{}", arg.summary);
+        }
     }
 
     /// Every bound `urn:sparql:{verb}` must project a DISTINCT description id (and name) —
@@ -948,6 +1099,7 @@ mod tests {
                 verb,
                 id,
                 shared: None,
+                ceiling: budget::DEFAULT_BUDGET,
             })
             .collect();
         // describe().id and name() agree, and all four are distinct.
@@ -969,6 +1121,7 @@ mod tests {
             verb: "select",
             id: "sparql-select",
             shared: None,
+            ceiling: budget::DEFAULT_BUDGET,
         }
         .describe();
         let required: Vec<&str> = desc
@@ -1023,8 +1176,9 @@ mod tests {
                 )
                 .unwrap();
         }
-        let results = evaluate(query, &store).unwrap();
-        serialize_results(results, as_type).map(|(media, _)| media)
+        let token = CancellationToken::new();
+        let results = evaluate(query, &store, &token).unwrap();
+        serialize_results(results, as_type, &token).map(|(media, _)| media)
     }
 
     #[test]
@@ -1436,6 +1590,7 @@ mod tests {
                 verb: "select",
                 id: "sparql-select",
                 shared: Some(Arc::clone(&store)),
+                ceiling: budget::DEFAULT_BUDGET,
             }
             .describe();
             assert!(
@@ -1630,7 +1785,11 @@ mod tests {
         #[test]
         fn the_sink_action_declares_the_scope_the_kernel_enforces() {
             let store = Arc::new(Store::new().unwrap());
-            let desc = SparqlUpdateEndpoint { store }.describe();
+            let desc = SparqlUpdateEndpoint {
+                store,
+                ceiling: budget::DEFAULT_BUDGET,
+            }
+            .describe();
             let sink: Vec<_> = desc
                 .action_specs()
                 .into_iter()
@@ -1734,6 +1893,7 @@ mod tests {
             // The manifold must not offer it either.
             let desc = SparqlUpdateEndpoint {
                 store: Arc::clone(&store),
+                ceiling: budget::DEFAULT_BUDGET,
             }
             .describe();
             assert!(

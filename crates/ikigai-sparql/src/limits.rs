@@ -46,6 +46,7 @@
 //! more than two minutes, and long property paths, long BGPs and deeply nested collections
 //! are slow well before they are deep. This module is about the stack — an abort takes
 //! down every request at once — and leaves a query budget to the host.
+//! COPY: in this crate that budget is [`crate::budget`] (ledger #964).
 //!
 //! # The scan is exact about what it skips, and that took an automaton
 //!

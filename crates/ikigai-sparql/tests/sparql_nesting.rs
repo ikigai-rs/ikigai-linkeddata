@@ -390,19 +390,23 @@ fn the_measured_release_aborts_are_refused_or_answered() {
         // Not here, though both aborted a release build inline: a 5,000-step property path
         // (15 KB) and 2,000 triple patterns. On the sized stack neither aborts, and neither
         // finishes in reasonable time either: the path ran past ten minutes of a core and
-        // the patterns past a minute before being stopped (2026-10-09). That is the TIME
-        // these bounds leave to the host (see the README), not a stack outcome to pin.
+        // the patterns past a minute before being stopped (2026-10-09). That is TIME, which
+        // `src/budget.rs` now bounds (ledger #964), not a stack outcome to pin.
+        //
+        // Since that budget, these four are over `budget::MAX_ALGEBRA_NODES` too, so they are
+        // refused AFTER parsing and before planning. What this pins is unchanged: the parse,
+        // which recurses on all of them, runs on the sized stack and aborts nothing.
         for (shape, n) in [
             ("or1", 2_500),
             ("mul", 5_000),
             ("plus", 5_000),
             ("filters", 2_500),
         ] {
-            cases.push((door, shape, n, "ok"));
+            cases.push((door, shape, n, "parsed"));
         }
     }
     cases.push(("s-update", "parens", 1_000, "refused"));
-    cases.push(("s-update", "or", 2_500, "ok"));
+    cases.push(("s-update", "or", 2_500, "parsed"));
     let mut failures = Vec::new();
     for (door, shape, n, want) in cases {
         let started = std::time::Instant::now();
@@ -410,6 +414,10 @@ fn the_measured_release_aborts_are_refused_or_answered() {
         let took = started.elapsed();
         let good = match (&outcome, want) {
             (Ok(o), "ok") => o.starts_with("ok "),
+            (Ok(o), "parsed") => {
+                o.starts_with("ok ")
+                    || (o.starts_with("err invalid argument") && o.contains("MAX_ALGEBRA_NODES"))
+            }
             (Ok(o), _) => o.starts_with("err invalid argument") && o.contains("64"),
             (Err(_), _) => false,
         };
