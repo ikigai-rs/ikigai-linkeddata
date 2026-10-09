@@ -174,6 +174,64 @@ a change to any underlying graph auto-invalidates the cached result. An `http(s)
 is fetched via `urn:httpGet`, so its own cache policy propagates into the query result;
 `urn:`/`file:` graphs resolve directly.
 
+## Bounds on caller SPARQL
+
+Oxigraph's SPARQL parser and evaluator are **recursive**, so a query's shape is a claim on
+the stack of whatever thread runs it, and running out is not an error a caller gets back:
+Rust aborts the **whole process** on a stack overflow, on any thread. Through 0.1.10, one
+query of about 2 KB — `SELECT * WHERE { FILTER(((…1…))) }` with ~1,000 parentheses —
+aborted any release-built host that ran it, through any of the nine doors that parse caller
+text (the four query forms in each space, and `urn:sparql:update`), and a host that exposes
+`urn:sparql:select` to anonymous visitors exposes that to anyone.
+
+Two layers now stand in front of the parser, at all nine doors:
+
+| bound | value | what it stops |
+| --- | --- | --- |
+| `limits::MAX_SPARQL_BYTES` | 1 MiB | any query or update larger, refused before parsing |
+| `limits::MAX_SPARQL_NESTING` | 64 | brackets `(` `{` `[` `<<`, and runs of `!`, nested deeper, refused before parsing |
+| the SPARQL thread | 16 MiB + 512 bytes per byte of text | everything else that recurses, run on a stack sized for it |
+
+**The bounds refuse, never truncate**: the refusal is an `InvalidArgument` on `query` (or
+`update`/`content`) that names the bound, and a query is refused before any `graph=` source
+is resolved. Real queries nest about 5 deep; 64 is an order of magnitude of headroom, and
+the largest legitimate queries (`VALUES` lists, `INSERT DATA`) are flat and do not recurse
+at all, which is why the byte bound can be generous.
+
+**Why a thread as well.** Nesting is not the only recursion. On a 2 MiB thread (a tokio
+worker's), a release build aborted on a 2,500-term `1||1…` chain, 5,000 `*1` or `+1` terms,
+2,500 `FILTER`s, 2,000 triple patterns or a 5,000-step property path, none of them nested.
+A generated query can really have those shapes, so nothing lexical may refuse them. The
+parse, the evaluation and the serialization therefore run on a thread whose stack is
+reserved in proportion to the text: an ordinary query's thread is ~16 MiB of address space,
+touched only as deep as it recurses.
+
+**The scan follows every reading.** Counting brackets while skipping strings, IRIs and
+comments is wrong in a way an attacker can use: in an expression, `?a<'> ) '` is a
+less-than followed by a string, and a scan that skipped `<'>` as an IRI never sees the
+string open. So at each `<` where a less-than is possible, the scan follows both readings
+and refuses on the deeper (`src/limits.rs` has the argument).
+
+⚠ What this does **not** do, plainly:
+
+- **It is a release-build guarantee for the thread.** A debug build spends ~20–50× the stack
+  per level, so a long enough operator chain can still overflow a debug host. The nesting
+  bound holds in both.
+- **On wasm there are no threads**, so only the two bounds apply.
+- **It does not bound time.** The evaluator is quadratic in an operator chain, and worse on
+  some shapes: on the per-query dataset, a 5,000-step property path (15 KB) ran for more
+  than ten minutes of a core and 2,000 triple patterns for more than a minute, without
+  finishing. A host that runs untrusted queries needs its own budget.
+- **The bounds are constants, not configuration.** They protect the process, not a policy.
+  A host with its own SPARQL face over oxigraph can apply the same bound with
+  `ikigai_sparql::limits::check_sparql`, and must parse on `limits::on_sparql_stack`.
+
+`src/limits.rs` is a copy of `ikigai-store`'s (commit `6abf030`, ledger #915), kept
+byte-for-byte except where marked, until a shared crate replaces both.
+`tests/sparql_nesting.rs` reproduces the abort in a child process on a 2 MiB thread at all
+nine doors (it fails, with the child killed by `SIGABRT`, against 0.1.10);
+`tests/sparql_stack_measure.rs` re-measures the stack each shape costs when oxigraph moves.
+
 ## Conformance
 
 Passes [`ikigai-conformance`](https://crates.io/crates/ikigai-conformance)

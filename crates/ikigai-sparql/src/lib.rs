@@ -34,8 +34,16 @@
 //! contents and lifecycle (nothing auto-loaded; [`load_vocabulary`] is the opt-in),
 //! `graph=` is not offered, and results are uncacheable (live data, and still a
 //! partially-covered golden thread). [`space`]'s behavior is unchanged.
+//!
+//! **Caller SPARQL is bounded before it is parsed** (ledger #962). Oxigraph's parser and
+//! evaluator are recursive and a stack overflow aborts the whole host, so every door that
+//! parses caller text refuses one over [`limits::MAX_SPARQL_BYTES`] or nested deeper than
+//! [`limits::MAX_SPARQL_NESTING`], and parses, evaluates and serializes the rest on a thread
+//! whose stack is sized from the text ([`limits::on_sparql_stack`]). See [`limits`].
 
 #![forbid(unsafe_code)]
+
+pub mod limits;
 
 use async_trait::async_trait;
 use ikigai_core::{
@@ -303,6 +311,10 @@ impl Endpoint for SparqlEndpoint {
         let query_str = inv.inline_str("query").map_err(|_| {
             Error::Endpoint("urn:sparql:* needs a `query=<sparql>` argument".to_string())
         })?;
+        // Before anything else, `graph=` sources included: a text the parser cannot be
+        // trusted with is refused without costing a single resolution (ledger #962).
+        limits::check_sparql(query_str, "query")?;
+        let as_type = inv.inline_str("as").ok();
 
         // The shared-store variant: run the query over the caller-owned live store.
         // Uncacheable — raw-handle writes carry no golden thread, so a cached result
@@ -316,8 +328,7 @@ impl Endpoint for SparqlEndpoint {
                         .to_string(),
                 ));
             }
-            let results = evaluate(query_str, store)?;
-            let (media, bytes) = serialize_results(results, inv.inline_str("as").ok())?;
+            let (media, bytes) = query_on_sized_stack(query_str, store, as_type)?;
             return Ok(Representation::new(utf8_repr(&media), bytes));
         }
 
@@ -348,8 +359,7 @@ impl Endpoint for SparqlEndpoint {
                 .map_err(|e| Error::Endpoint(format!("loading <{uri}>: {e}")))?;
         }
 
-        let results = evaluate(query_str, &store)?;
-        let (media, bytes) = serialize_results(results, inv.inline_str("as").ok())?;
+        let (media, bytes) = query_on_sized_stack(query_str, &store, as_type)?;
         Ok(Representation::new(utf8_repr(&media), bytes).cacheable())
     }
 
@@ -488,21 +498,34 @@ impl Endpoint for SparqlUpdateEndpoint {
                 )
             })?;
 
+        // The text arrives as `update` or `content`; the refusal names the one the caller
+        // used, so it can be acted on (ledger #962).
+        let arg = if inv.inline_str("update").is_ok() {
+            "update"
+        } else {
+            "content"
+        };
+        limits::check_sparql(update_str, arg)?;
+
         let before = self
             .store
             .len()
             .map_err(|e| Error::Endpoint(format!("store size: {e}")))?;
 
-        // Parse, then execute. `on_store` opens a transaction and `execute` commits it
-        // only after every operation succeeds — so a syntax error applies nothing, and a
-        // multi-operation update that fails halfway rolls the whole thing back.
-        let prepared = SparqlEvaluator::new()
-            .parse_update(update_str)
-            .map_err(|e| Error::Endpoint(format!("SPARQL UPDATE syntax error: {e}")))?;
-        prepared
-            .on_store(&self.store)
-            .execute()
-            .map_err(|e| Error::Endpoint(format!("update evaluation error: {e}")))?;
+        // Parse, then execute, both on a stack sized for the text: the update's WHERE is
+        // evaluated as recursively as a query's. `on_store` opens a transaction and
+        // `execute` commits it only after every operation succeeds — so a syntax error
+        // applies nothing, and a multi-operation update that fails halfway rolls the whole
+        // thing back.
+        limits::on_sparql_stack(update_str, || {
+            let prepared = SparqlEvaluator::new()
+                .parse_update(update_str)
+                .map_err(|e| Error::Endpoint(format!("SPARQL UPDATE syntax error: {e}")))?;
+            prepared
+                .on_store(&self.store)
+                .execute()
+                .map_err(|e| Error::Endpoint(format!("update evaluation error: {e}")))
+        })?;
 
         let after = self
             .store
@@ -576,6 +599,20 @@ async fn resolve_graph(inv: &Invocation<'_>, uri: &str) -> Result<Representation
             Iri::parse(uri).map_err(|e| Error::Endpoint(format!("bad graph IRI `{uri}`: {e}")))?;
         inv.source(&iri).await
     }
+}
+
+/// Parse, evaluate and serialize `query_str` over `store` on a thread whose stack is sized
+/// for the text ([`limits::on_sparql_stack`]). All three steps recurse, and evaluation is
+/// lazy — rows are produced while they are serialized — so all three run there. The caller
+/// has already passed the text through [`limits::check_sparql`].
+fn query_on_sized_stack(
+    query_str: &str,
+    store: &Store,
+    as_type: Option<&str>,
+) -> Result<(String, Vec<u8>)> {
+    limits::on_sparql_stack(query_str, || {
+        serialize_results(evaluate(query_str, store)?, as_type)
+    })
 }
 
 /// Parse and run a query over `store` with the default graph set to the union of all
