@@ -18,6 +18,9 @@
 
 #![forbid(unsafe_code)]
 
+mod depth;
+pub use depth::{check_rdfxml_nesting, check_turtle_nesting, MAX_TURTLE_NESTING};
+
 use ikigai_core::{
     space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, FnEndpoint, Invocation,
     Iri, ReprType, Representation, Result, Verb,
@@ -60,7 +63,11 @@ pub fn subclass_axioms(turtle: &str) -> Vec<(String, String)> {
 /// Parse Turtle into an [`oxrdf::Graph`] — a triple SET, so union is `extend`
 /// and difference is a filter. Works because our event graphs are SKOLEMIZED
 /// (no blank nodes): graph equality is set equality, never isomorphism.
-fn parse_graph(turtle: &str, who: &str) -> Result<Graph> {
+///
+/// `arg` names the argument the text arrived in, which a depth refusal names (ledger #992):
+/// the nesting is bounded BEFORE the parser sees the text, since the parser itself recurses.
+fn parse_graph(turtle: &str, who: &str, arg: &str) -> Result<Graph> {
+    check_turtle_nesting(turtle, arg)?;
     let mut graph = Graph::default();
     for quad in RdfParser::from_format(RdfFormat::Turtle).for_slice(turtle.as_bytes()) {
         let quad = quad.map_err(|e| Error::Endpoint(format!("{who}: RDF parse error: {e}")))?;
@@ -91,7 +98,7 @@ async fn with_graph(inv: &Invocation<'_>, who: &str) -> Result<Graph> {
         Error::Endpoint(format!("{who}: needs with= (a graph IRI or inline Turtle)"))
     })?;
     if with.trim_start().starts_with('@') || with.trim_start().starts_with('<') {
-        return parse_graph(with, who);
+        return parse_graph(with, who, "with");
     }
     // Compose-marker convention: `with=<iri>?k=v&…` carries request arguments
     // (e.g. urn:org:agenda:week?as=text/turtle asks for the Turtle face).
@@ -113,7 +120,8 @@ async fn with_graph(inv: &Invocation<'_>, who: &str) -> Result<Graph> {
     let repr = inv.issue(request).await?;
     let text = String::from_utf8(repr.bytes)
         .map_err(|_| Error::Endpoint(format!("{who}: {with} is not UTF-8 Turtle")))?;
-    parse_graph(&text, who)
+    // A resolved graph is caller text too: `with=` named it, so a refusal names `with`.
+    parse_graph(&text, who, "with")
 }
 
 /// `urn:rdf:union` — the piped graph ∪ the `with=` graph, as Turtle. Set
@@ -127,7 +135,7 @@ impl Endpoint for UnionEndpoint {
         let content = inv
             .inline_str("content")
             .map_err(|_| Error::Endpoint("urn:rdf:union: pipe a Turtle graph in".to_string()))?;
-        let mut graph = parse_graph(content, "urn:rdf:union")?;
+        let mut graph = parse_graph(content, "urn:rdf:union", "content")?;
         for triple in with_graph(inv, "urn:rdf:union").await?.iter() {
             graph.insert(triple);
         }
@@ -181,7 +189,7 @@ impl Endpoint for DiffEndpoint {
             .inline_str("content")
             .map_err(|_| Error::Endpoint("urn:rdf:diff: pipe a Turtle graph in".to_string()))?;
         let mode = inv.inline_str("mode").unwrap_or("added");
-        let ours = parse_graph(content, "urn:rdf:diff")?;
+        let ours = parse_graph(content, "urn:rdf:diff", "content")?;
         let theirs = with_graph(inv, "urn:rdf:diff").await?;
         let (keep, exclude) = match mode {
             "added" => (&ours, &theirs),
@@ -350,6 +358,14 @@ fn transrept(inv: &Invocation<'_>) -> Result<Representation> {
 /// canonical media type and the serialized bytes.
 fn transrept_bytes(input: &[u8], as_type: &str) -> Result<(String, Vec<u8>)> {
     let from = sniff(input);
+    // Bound triple-term depth before any parser, serializer or `Display` recurses over it
+    // (ledger #992), with the scan that matches the parser `from` selects. JSON-LD carries no
+    // triple terms (see `depth`); every other syntax here is read by oxttl.
+    match from {
+        RdfFormat::RdfXml => check_rdfxml_nesting(input, "content")?,
+        RdfFormat::JsonLd { .. } => {}
+        _ => check_turtle_nesting(&String::from_utf8_lossy(input), "content")?,
+    }
 
     // The human view: a subject/predicate/object table over the parsed triples.
     if media_base(as_type) == "text/html" {
@@ -558,7 +574,7 @@ mod tests {
             request = request.with_arg(*k, ikigai_core::ArgRef::Inline(v.as_bytes().to_vec()));
         }
         let out = block_on(kernel.issue(request, &Capability::root())).unwrap();
-        parse_graph(&String::from_utf8(out.bytes).unwrap(), "test").unwrap()
+        parse_graph(&String::from_utf8(out.bytes).unwrap(), "test", "content").unwrap()
     }
 
     #[test]

@@ -25,6 +25,12 @@ async-trait = "0.1"
 [dev-dependencies]
 # block_on for driving kernel.issue in the shared-store tests.
 futures = "0.3"
+# RDF 1.2 ON in the tests, as it is in ikigai-cli, where rudof turns on `oxigraph/rdf-12`. Needed
+# for the WORKSPACE to build at all now that ikigai-rdf's tests turn on `oxrdfio/rdf-12` (ledger
+# #992): that reaches oxrdf, and spargebra 0.4.7 does not compile against an rdf-12 oxrdf unless
+# its own `sparql-12` is on too, which only oxigraph's `rdf-12` brings. Features unify across a
+# workspace test build, so without this line `cargo test --workspace` fails in spargebra.
+oxigraph = { workspace = true, features = ["rdf-12"] }
 # The module recipe as one test (`tests/conformance.rs`): walks every bound
 # endpoint and reports every violation at once. 0.6.0 for SPACE-NAME (ledger #987):
 # the suite holds `space()` to the name it claims.
