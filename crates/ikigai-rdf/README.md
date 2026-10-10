@@ -55,6 +55,8 @@ let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
 let kernel = Kernel::new(root);
 ```
 
+`space()` names itself `urn:iki:space:rdf` (`ikigai_rdf::SPACE_ID`).
+
 ## Caching
 
 Transreption is a pure function of its input bytes, so its output is *as cacheable as its

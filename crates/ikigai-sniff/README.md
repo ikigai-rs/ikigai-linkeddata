@@ -27,6 +27,8 @@ requested `as=`, and runs it — so a caller can convert opaque bytes without kn
 they are. When the bytes already are the target it is a pass-through; when nothing converts
 them it is a clean error naming the sniffed type, never a mis-parse.
 
+`space()` binds both, and names itself `urn:iki:space:sniff` (`ikigai_sniff::SPACE_ID`).
+
 ```shell
 # What did that server actually send?
 source urn:httpGet url=https://example.org/thing | urn:sniff

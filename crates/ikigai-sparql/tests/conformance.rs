@@ -43,12 +43,23 @@
 //! takes a [`Fixture`] carrying one. `as=` is never fixed: the suite sets it per
 //! declared face, and the endpoint's per-form default covers the rest.
 //!
+//! ## A space's name (SPACE-NAME)
+//!
+//! `space()` is the one configuration-free constructor, so it is declared self-named and
+//! claims `urn:iki:space:sparql` (exported as `SPACE_ID`). Every other constructor is
+//! declared host-named: `space_with_budget` and `space_with_bounds` take a ceiling and a
+//! bound, and a different ceiling is still a different claim even over the same doors;
+//! `space_with_store*` are built over the host's store. Only the host knows which instance it
+//! built, so only the host names them, and the suite holds each to claiming nothing.
+//!
 //! No opt-outs, no module namespace, and NAMES runs: every id is kebab-case.
 
 use ikigai_conformance::{Fixture, Report, Suite};
 use ikigai_core::{Kernel, Verb};
+use ikigai_sparql::budget::{AnswerBound, DEFAULT_BUDGET};
 use ikigai_sparql::{load_vocabulary, Store};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The four query forms both spaces bind, by description id, each with a query
 /// that is valid over the vocabulary alone (and over an empty store).
@@ -105,12 +116,27 @@ fn conforms() {
         .iter()
         .fold(form_fixtures(Suite::new()), |suite, (id, _)| {
             suite.pure(*id).cacheable(*id)
-        });
+        })
+        .self_named_space("sparql", ikigai_sparql::space)
+        // The same doors as `space()` at the default ceiling, and still anonymous: the name
+        // belongs to the configuration-free constructor, not to a door set.
+        .host_named_space(
+            "ikigai_sparql::space_with_budget(ceiling)",
+            ikigai_sparql::space_with_budget(DEFAULT_BUDGET),
+        )
+        .host_named_space(
+            "ikigai_sparql::space_with_bounds(ceiling, answer)",
+            ikigai_sparql::space_with_bounds(Duration::from_secs(1), AnswerBound::DEFAULT),
+        );
     let report = suite.run_blocking(&kernel);
     // Printed even when clean (`--nocapture`): the report is the record.
     eprintln!("{report}");
     assert!(report.is_clean(), "{report}");
     assert_shape(&report, FORMS.len());
+    assert_eq!(
+        ikigai_core::space_iri("sparql").as_str(),
+        ikigai_sparql::SPACE_ID
+    );
 }
 
 #[test]
@@ -118,11 +144,25 @@ fn shared_store_conforms() {
     let store = Arc::new(Store::new().unwrap());
     load_vocabulary(&store).unwrap();
     let seeded = store.len().unwrap();
-    let kernel = Kernel::new(Arc::new(ikigai_sparql::space_with_store(Arc::clone(
-        &store,
-    ))));
+    // One space, handed to the kernel and to the suite (`Arc<S>` is a `Space`), so the
+    // host-named declaration is about the instance the walk runs.
+    let space = Arc::new(ikigai_sparql::space_with_store(Arc::clone(&store)));
+    let kernel = Kernel::new(space.clone());
     let suite = form_fixtures(Suite::new())
-        .fixture(Fixture::new(UPDATE, Verb::Sink).arg("content", INSERT));
+        .fixture(Fixture::new(UPDATE, Verb::Sink).arg("content", INSERT))
+        .host_named_space("ikigai_sparql::space_with_store(store)", space)
+        .host_named_space(
+            "ikigai_sparql::space_with_store_and_budget(store, ceiling)",
+            ikigai_sparql::space_with_store_and_budget(Arc::clone(&store), DEFAULT_BUDGET),
+        )
+        .host_named_space(
+            "ikigai_sparql::space_with_store_and_bounds(store, ceiling, answer)",
+            ikigai_sparql::space_with_store_and_bounds(
+                Arc::clone(&store),
+                Duration::from_secs(1),
+                AnswerBound::DEFAULT,
+            ),
+        );
     let report = suite.run_blocking(&kernel);
     eprintln!("{report}");
     assert!(report.is_clean(), "{report}");

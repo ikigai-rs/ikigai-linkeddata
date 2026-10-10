@@ -16,7 +16,10 @@ homepage = "https://github.com/ikigai-rs/ikigai-linkeddata"
 # (declared = enforced, before invoke and before the cache lookup) is what turns that
 # declaration into a gate. Against an older core the endpoint would parse, describe
 # and publish its capability — and admit every caller. Verified present in 0.1.50.
-ikigai-core = "0.1.50" # enforce_requires (declared = enforced); ArgSpec one_of/default
+# The floor is now 0.1.89, for `space_iri` (each crate's configuration-free `space()` names
+# itself `urn:iki:space:<module>`, ledger #987) and for `bind` dropping a name, which keeps a
+# host that extends one of these spaces from carrying the name over different doors.
+ikigai-core = "0.1.89" # space_iri + bind drops the name; enforce_requires; ArgSpec one_of/default
 # The ikigai vocabulary (ns# ontology + Description→Turtle). ikigai-sparql bundles its
 # schema graph so endpoint instances can be joined against the class/property defs.
 ikigai-vocab = "0.1.22"
