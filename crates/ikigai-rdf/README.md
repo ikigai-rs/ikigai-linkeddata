@@ -57,6 +57,16 @@ let kernel = Kernel::new(root);
 
 Since 0.2.0, `space()` names itself `urn:iki:space:rdf` (`ikigai_rdf::SPACE_ID`).
 
+## Bounded nesting
+
+With RDF 1.2 on (`oxrdfio/rdf-12`, which any crate in a build can turn on for all of them),
+the RDF library copies a nested triple term recursively, and a stack overflow aborts the whole
+host. So every door here reads caller RDF for triple-term depth before parsing it, and
+refuses past `MAX_TURTLE_NESTING` (64) as an `InvalidArgument` naming the argument that
+carried it (`content` or `with`): `<<` nesting in Turtle, N-Triples, N-Quads and TriG,
+nested `rdf:parseType` elements in RDF/XML. The scans are exported as
+`check_turtle_nesting` and `check_rdfxml_nesting`.
+
 ## Caching
 
 Transreption is a pure function of its input bytes, so its output is *as cacheable as its

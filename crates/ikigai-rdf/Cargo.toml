@@ -15,6 +15,11 @@ async-trait = "0.1"
 ikigai-core = { workspace = true }
 oxrdfio = { workspace = true }
 oxrdf = { workspace = true }
+# The XML reader oxrdfxml parses with, run over caller RDF/XML first to bound triple-term depth
+# (ledger #992, `src/depth.rs`): the scan IS the parser's lexer rather than a hand mirror of it.
+# "0.37" because oxrdfxml 0.2.4 (oxrdfio 0.2.6) asks for exactly that line, so the two resolve to
+# ONE copy; when oxrdfio's floor moves, move this with oxrdfxml's quick-xml line.
+quick-xml = "0.37"
 
 # oxrdf/oxrdfio depend on getrandom; on wasm its JS backend must be enabled (paired
 # with the `getrandom_backend` cfg in .cargo/config.toml). Not used directly.
@@ -23,6 +28,13 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 futures = "0.3"
+# RDF 1.2 ON in the tests, as it is in ikigai-cli: rudof enables `oxrdfio/rdf-12` there, and
+# feature unification turns it on for this crate too. Without it `<<(` is a syntax error and the
+# triple-term depth tests (`tests/triple_term_depth.rs`, ledger #992) would test nothing.
+oxrdfio = { workspace = true, features = ["rdf-12"] }
+# `urn:transrept:auto` routes Turtle to `urn:rdf:transrept`, so the depth tests drive it too.
+# Path-only: a dev-dependency without a version is dropped from the published manifest.
+ikigai-sniff = { path = "../ikigai-sniff" }
 # The module recipe as one test (`tests/conformance.rs`): walks every bound
 # endpoint and reports every violation at once. 0.6.0 for SPACE-NAME (ledger #987):
 # the suite holds `space()` to the name it claims.
