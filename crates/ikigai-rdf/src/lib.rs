@@ -19,7 +19,10 @@
 #![forbid(unsafe_code)]
 
 mod depth;
-pub use depth::{check_rdfxml_nesting, check_turtle_nesting, MAX_TURTLE_NESTING};
+pub use depth::{
+    check_json_nesting, check_rdfxml_nesting, check_turtle_nesting, JSON_LD_STACK,
+    MAX_JSON_NESTING, MAX_TURTLE_NESTING,
+};
 
 use ikigai_core::{
     space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, FnEndpoint, Invocation,
@@ -358,15 +361,25 @@ fn transrept(inv: &Invocation<'_>) -> Result<Representation> {
 /// canonical media type and the serialized bytes.
 fn transrept_bytes(input: &[u8], as_type: &str) -> Result<(String, Vec<u8>)> {
     let from = sniff(input);
-    // Bound triple-term depth before any parser, serializer or `Display` recurses over it
-    // (ledger #992), with the scan that matches the parser `from` selects. JSON-LD carries no
-    // triple terms (see `depth`); every other syntax here is read by oxttl.
+    // Bound nesting before any parser, serializer or `Display` recurses over it, with the scan
+    // that matches the parser `from` selects: triple-term depth for RDF/XML and for everything
+    // oxttl reads (ledger #992); JSON depth for JSON-LD, which carries no triple terms but whose
+    // expander recurses once per nested node object, so it also parses on a sized thread
+    // (ledger #1038, see `depth`).
     match from {
         RdfFormat::RdfXml => check_rdfxml_nesting(input, "content")?,
-        RdfFormat::JsonLd { .. } => {}
+        RdfFormat::JsonLd { .. } => {
+            check_json_nesting(input, "content")?;
+            return depth::on_json_ld_stack(|| convert(input, from, as_type));
+        }
         _ => check_turtle_nesting(&String::from_utf8_lossy(input), "content")?,
     }
+    convert(input, from, as_type)
+}
 
+/// Parse `input` as `from` and serialize it as `as_type`: the half of [`transrept_bytes`] after
+/// the bounds, run on the JSON-LD thread when `from` is JSON-LD.
+fn convert(input: &[u8], from: RdfFormat, as_type: &str) -> Result<(String, Vec<u8>)> {
     // The human view: a subject/predicate/object table over the parsed triples.
     if media_base(as_type) == "text/html" {
         let html = to_html(RdfParser::from_format(from).for_slice(input))?;

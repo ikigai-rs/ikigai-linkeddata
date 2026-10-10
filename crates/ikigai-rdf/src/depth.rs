@@ -11,9 +11,42 @@
 //!
 //! Each scan here reads the text the way the parser that will read it does, refuses past
 //! [`MAX_TURTLE_NESTING`] as a typed `InvalidArgument` naming the argument that carried the
-//! text, and costs one pass with no recursion. JSON-LD needs none: oxjsonld 0.2's `rdf-12`
-//! adds only directional language strings, never a triple term (re-read `to_rdf.rs` when
-//! raising the oxrdfio floor).
+//! text, and costs one pass with no recursion. oxjsonld 0.2's `rdf-12` adds only directional
+//! language strings, never a triple term (re-read `to_rdf.rs` when raising the oxrdfio floor),
+//! but JSON-LD has a recursion of its own, below.
+//!
+//! # JSON-LD: a depth bound AND a sized stack (ledger #1038)
+//!
+//! oxjsonld's expander buffers each node object's events until it has seen the whole object
+//! (an `@context` may come last), then replays them through itself, so it recurses once per
+//! nested node object. `{"@id":…,"p":{"@id":…,"p":{…}}}` 1,021 levels deep (about 36 KB)
+//! aborted the host through `urn:rdf:transrept` on a 2 MiB thread in a release build, and 29
+//! levels (about 1 KB) in a debug one. Measured by `tests/jsonld_depth_measure.rs`, oxjsonld
+//! 0.2.6, aarch64-apple-darwin, the largest JSON depth (`{` and `[` alike) that survived the
+//! parser alone:
+//!
+//! | shape | debug, 2 MiB | debug, 8 MiB | debug, 64 MiB | release, 2 MiB | release, 8 MiB |
+//! | --- | --- | --- | --- | --- | --- |
+//! | node objects as values (one level a level) | 29 | 126 | 1,030 | 1,025 | 4,093 |
+//! | blank nodes, `@reverse`, `@graph`, `@list` objects, unmapped keys | 28–59 | | | 1,024–2,049 | |
+//! | scoped `@context`s in term definitions (two levels a level) | 158 | 658 | 5,338 | 902 | 3,602 |
+//! | arrays only: of values, in `@list`, at the top, in `@context`; a `@json` literal | ≥ 4,097 | | | ≥ 16,385 | |
+//!
+//! So a node level costs ~64 KiB of stack in a debug build and ~2 KiB in release, linearly in
+//! the thread's size; arrays alone never recurse. A bigger stack alone would NOT be the fix:
+//! the replay also re-buffers a node's whole content once per level, so memory grows with the
+//! square of the depth (8,000 levels, ~290 KB of JSON, took 5.2 GB; 16,000 would take ~20), and
+//! on a 64 MiB thread a ~1 MB document runs the host out of memory instead of stack.
+//!
+//! Hence two layers, as `ikigai-sparql`'s `limits` does for SPARQL:
+//!
+//! 1. [`check_json_nesting`] refuses JSON nested deeper than [`MAX_JSON_NESTING`] (64), as a
+//!    typed `InvalidArgument`, before the parser sees a byte. That bounds the recursion and the
+//!    memory both: the re-buffering costs at most 64 times the document.
+//! 2. The JSON-LD parse runs on a thread of [`JSON_LD_STACK`] (16 MiB), so a debug build holds
+//!    the bound too (it needs ~4.5 MiB at 64), and a debug and a release host admit and answer
+//!    the same documents. ⚠ On wasm there is no thread: the parse runs inline, and the bound
+//!    alone applies (~130 KiB at 64 in an optimized build).
 
 use ikigai_core::{Error, Result};
 use quick_xml::events::Event;
@@ -30,6 +63,125 @@ use quick_xml::NsReader;
 /// caller nesting across the doors. Real data nests these a handful deep; a debug build
 /// survived 300 levels on a 2 MiB thread and aborted at 3000.
 pub const MAX_TURTLE_NESTING: usize = 64;
+
+/// How deep caller JSON-LD may nest JSON objects and arrays, counted together, outside strings:
+/// **64**, the same number as [`MAX_TURTLE_NESTING`], so one bound on caller nesting holds
+/// across the doors.
+///
+/// Real JSON-LD is shallow: the deepest of the 2,146 documents in the W3C JSON-LD 1.1 API test
+/// suite (expand, compact, flatten, toRdf, fromRdf) nests 10, and every JSON-LD file in the
+/// ikigai ecosystem (the vocabulary's context among them) 3 (measured 2026-10-10). Arrays count
+/// although they never recurse alone, because compacted JSON-LD wraps values in arrays freely,
+/// so a node level is one or two JSON levels and the count stays a plain bracket count.
+pub const MAX_JSON_NESTING: usize = 64;
+
+/// The stack the JSON-LD parse is given on a thread of its own (native only): 16 MiB.
+///
+/// A debug build spends ~64 KiB of stack per nested node object and a release one ~2 KiB, so a
+/// document at [`MAX_JSON_NESTING`] needs ~4.5 MiB in debug, more than a tokio worker's 2 MiB;
+/// 16 MiB holds about 250 levels in debug, four times the bound. Reserved address space, touched
+/// only as deep as a document recurses.
+pub const JSON_LD_STACK: usize = 16 << 20;
+
+/// Refuse caller JSON (here, JSON-LD) that nests objects and arrays deeper than
+/// [`MAX_JSON_NESTING`], without parsing it.
+///
+/// One pass, no recursion, and it reads strings as JSON does: a string opens at a `"` outside
+/// one and closes at the next `"` not escaped by `\`, so a bracket inside a string is text.
+/// It counts the whole input, past the point where the parser would stop at an error, which is
+/// the safe direction (it can over-count, never hide a level the parser reads).
+///
+/// The bound alone does not make a debug build safe on a small thread (see the module notes):
+/// a host with its own JSON-LD door over oxjsonld should parse on a thread like
+/// [`JSON_LD_STACK`], as `urn:rdf:transrept` does.
+///
+/// ```
+/// use ikigai_rdf::{check_json_nesting, MAX_JSON_NESTING};
+///
+/// let nodes = |n: usize| {
+///     format!("{}{{}}{}", "{\"urn:ex:p\":".repeat(n - 1), "}".repeat(n - 1))
+/// };
+/// assert!(check_json_nesting(nodes(MAX_JSON_NESTING).as_bytes(), "content").is_ok());
+/// let refusal = check_json_nesting(nodes(MAX_JSON_NESTING + 1).as_bytes(), "content")
+///     .unwrap_err()
+///     .to_string();
+/// assert!(refusal.starts_with("invalid argument `content`"), "{refusal}");
+/// assert!(refusal.contains("deeper than 64 (MAX_JSON_NESTING)"), "{refusal}");
+/// // Brackets in a string are not nesting.
+/// let quoted = format!("{{\"@id\":\"urn:ex:s\",\"urn:ex:p\":\"{}\"}}", "[{".repeat(100));
+/// assert!(check_json_nesting(quoted.as_bytes(), "content").is_ok());
+/// ```
+pub fn check_json_nesting(bytes: &[u8], arg: &str) -> Result<()> {
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                // A string: ends at the first `"` a `\` does not escape. The loop leaves `i` on
+                // that quote, and the step below moves past it.
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > MAX_JSON_NESTING {
+                    return Err(Error::InvalidArgument {
+                        name: arg.to_string(),
+                        detail: format!(
+                            "this JSON-LD nests JSON objects and arrays deeper than \
+                             {MAX_JSON_NESTING} (MAX_JSON_NESTING): the JSON-LD expander recurses \
+                             once per nested node object, where a stack overflow aborts the whole \
+                             host, and re-reads a node's content once per level. Real JSON-LD \
+                             nests about 10 deep at most; flatten this one"
+                        ),
+                    });
+                }
+            }
+            // A closer with nothing open is a syntax error the parser stops at.
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+/// Run `work`, a JSON-LD parse and what consumes it, on a thread of [`JSON_LD_STACK`], and wait
+/// for it. A panic there is resumed here, so the caller sees what it would have inline; a thread
+/// that cannot be spawned is a transient [`Error::Unavailable`], never a fallback to running
+/// inline, which is the overflow this exists to prevent. On wasm there are no threads, and
+/// `work` runs inline.
+pub(crate) fn on_json_ld_stack<T, F>(work: F) -> Result<T>
+where
+    T: Send,
+    F: FnOnce() -> Result<T> + Send,
+{
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::thread::scope(|scope| {
+            let handle = std::thread::Builder::new()
+                .name("ikigai-rdf-jsonld".to_string())
+                .stack_size(JSON_LD_STACK)
+                .spawn_scoped(scope, work)
+                .map_err(|e| {
+                    Error::Unavailable(format!(
+                        "could not start a {} MiB thread to parse this JSON-LD on: {e}",
+                        JSON_LD_STACK >> 20
+                    ))
+                })?;
+            match handle.join() {
+                Ok(result) => result,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        })
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        work()
+    }
+}
 
 fn too_deep(arg: &str, how: &str) -> Error {
     Error::InvalidArgument {
