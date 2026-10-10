@@ -58,6 +58,8 @@ fn query(shape: &str, n: usize) -> String {
             r("||false", n)
         ),
         "or1" => format!("SELECT * WHERE {{ FILTER(1{}) }}", r("||1", n)),
+        // `1*1*…`: a flat arithmetic chain, one algebra node a term, which the evaluator
+        // recurses over once per term at ~45 KiB a level in a DEBUG build (ledger #1025).
         "mul" => format!("SELECT * WHERE {{ FILTER(1{} > 0) }}", r("*1", n)),
         "plus" => format!("SELECT * WHERE {{ FILTER(1{} > 0) }}", r("+1", n)),
         "path" => format!(
@@ -70,6 +72,12 @@ fn query(shape: &str, n: usize) -> String {
             (0..n)
                 .map(|i| format!("?s <urn:p> ?o{i} . "))
                 .collect::<String>()
+        ),
+        // `IN` is one algebra node however long its list, and the evaluator rewrites it into
+        // an `||` of `=`, one level a member: ~1.2 KiB of stack a byte in a DEBUG build.
+        "in-list" => format!(
+            "SELECT * WHERE {{ FILTER(1 IN ({})) }}",
+            vec!["1"; n.max(1)].join(",")
         ),
         // The largest LEGITIMATE queries are flat: a VALUES list, one row per item.
         "values" => format!(
@@ -94,6 +102,10 @@ fn update(shape: &str, n: usize) -> String {
         "or" => format!(
             "INSERT {{ <urn:s> <urn:p> <urn:o> }} WHERE {{ ?s ?p ?o FILTER(false{}) }}",
             "||false".repeat(n)
+        ),
+        "mul" => format!(
+            "INSERT {{ <urn:s> <urn:p> <urn:o> }} WHERE {{ FILTER(1{} > 0) }}",
+            "*1".repeat(n)
         ),
         "insert-data" => format!(
             "INSERT DATA {{ {} }}",
@@ -373,9 +385,9 @@ fn a_query_past_the_byte_bound_is_refused_by_name_before_any_graph_is_resolved()
 
 /// RELEASE BUILDS ONLY: the shapes the ikigai-store #915 survey measured aborting a release
 /// build on a 2 MiB thread, each past that size, at both kinds of query door. Nested shapes
-/// are refused; every flat one runs on the stack `on_sparql_stack` sizes for it. A debug
-/// build spends ~20-50x the stack per level, so these sizes are past what it can guarantee
-/// (see `src/limits.rs`).
+/// are refused; every flat one runs on the stack `on_sparql_stack` sizes for it. It is a
+/// release-build test for its running time only: a debug build sizes its thread for its own
+/// frames (`limits::sparql_stack_size`, ledger #1025), but evaluates far slower.
 ///
 ///     cargo test --release -p ikigai-sparql --test sparql_nesting -- --ignored --nocapture
 #[test]
@@ -430,4 +442,38 @@ fn the_measured_release_aborts_are_refused_or_answered() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// ------------------------------------------------------------------ debug and release agree
+
+#[test]
+fn an_arithmetic_chain_at_the_algebra_bound_runs_in_every_build() {
+    // Ledger #1025: inside MAX_ALGEBRA_NODES (1024), so nothing refuses it, and a DEBUG build
+    // aborted on the 16 MiB + 512 B a byte the release sizing gives. It runs, in both. In
+    // `FILTER(1 op 1 … > 0)` the `Filter` and `>` are two nodes and each term one more; a
+    // query adds a `Project`, an update's WHERE does not.
+    for (door, shape, at_bound) in [
+        ("q-select", "plus", 1024 - 3),
+        ("q-select", "mul", 1024 - 3),
+        ("s-update", "mul", 1024 - 2),
+    ] {
+        let outcome = probe(door, shape, at_bound);
+        assert!(outcome.starts_with("ok"), "{door} {shape}: {outcome}");
+        let over = probe(door, shape, at_bound + 1);
+        assert!(over.contains("MAX_ALGEBRA_NODES"), "{door} {shape}: {over}");
+    }
+}
+
+/// The costliest shapes per byte that the algebra bound cannot refuse before they recurse,
+/// at the byte bound itself: the parse of a `1*1*…` chain (refused by the algebra bound only
+/// after it), and an `IN` list (one node however long, evaluated one level a member). In a
+/// debug build this reserves a ~2 GiB thread and touches about half of it, so it is also the
+/// check that a thread that size can be started on the platform CI runs.
+#[test]
+fn the_costliest_shapes_per_byte_at_the_byte_bound_abort_nothing() {
+    let room = (1 << 20) - 64;
+    let outcome = probe("q-select", "mul", room / 2);
+    assert!(outcome.contains("MAX_ALGEBRA_NODES"), "{outcome}");
+    let outcome = probe("q-select", "in-list", room / 2);
+    assert!(outcome.starts_with("ok"), "{outcome}");
 }

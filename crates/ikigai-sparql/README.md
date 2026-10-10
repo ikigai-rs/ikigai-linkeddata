@@ -200,7 +200,7 @@ Two layers now stand in front of the parser, at all nine doors:
 | --- | --- | --- |
 | `limits::MAX_SPARQL_BYTES` | 1 MiB | any query or update larger, refused before parsing |
 | `limits::MAX_SPARQL_NESTING` | 64 | brackets `(` `{` `[` `<<`, and runs of `!`, nested deeper, refused before parsing |
-| the SPARQL thread | 16 MiB + 512 bytes per byte of text | everything else that recurses, run on a stack sized for it |
+| the SPARQL thread | 16 MiB + 512 bytes per byte of text (a debug build: + 64 MiB, and 2 KiB a byte) | everything else that recurses, run on a stack sized for it |
 
 **The bounds refuse, never truncate**: the refusal is an `InvalidArgument` on `query` (or
 `update`/`content`) that names the bound, and a query is refused before any `graph=` source
@@ -224,17 +224,24 @@ and refuses on the deeper (`src/limits.rs` has the argument).
 
 ⚠ What this does **not** do, plainly:
 
-- **It is a release-build guarantee for the thread.** A debug build spends ~20–50× the stack
-  per level, so a long enough operator chain can still overflow a debug host. The nesting
-  bound holds in both.
+- **The thread is sized for the build** (ledger #1025, after ikigai-store's #1003). An
+  unoptimized build spends up to ~70× the stack per level, and through 0.2.0 a debug host
+  aborted on a `1*1*…` chain of ~405 terms, well inside the algebra bound of the
+  [time budget](#time-budget) below. A build with `debug_assertions` now adds 64 KiB for each
+  of the 1,024 algebra nodes that bound admits, and takes 2 KiB a byte in place of 512 (an
+  `IN` list is one node however long, and recurses once a member), so a debug and a release
+  host admit and answer the same queries. `limits::sparql_stack_size` is the one formula.
+  ⚠ It keys on `debug_assertions`, the only compile-time signal there is: a release profile
+  that turns optimization off without turning debug assertions on is the one it undersizes.
 - **On wasm there are no threads**, so only the two bounds apply.
 - **It does not bound time.** That is the [time budget](#time-budget)'s job, below.
 - **The bounds are constants, not configuration.** They protect the process, not a policy.
   A host with its own SPARQL face over oxigraph can apply the same bound with
   `ikigai_sparql::limits::check_sparql`, and must parse on `limits::on_sparql_stack`.
 
-`src/limits.rs` is a copy of `ikigai-store`'s (commit `6abf030`, ledger #915), kept
-byte-for-byte except where marked, until a shared crate replaces both.
+`src/limits.rs` is a copy of `ikigai-store`'s (commit `6abf030`, ledger #915; re-synced at
+`73e9ad0`, ledger #1025), kept byte-for-byte except where marked, until a shared crate
+replaces both.
 `tests/sparql_nesting.rs` reproduces the abort in a child process on a 2 MiB thread at all
 nine doors (it fails, with the child killed by `SIGABRT`, against 0.1.10);
 `tests/sparql_stack_measure.rs` re-measures the stack each shape costs when oxigraph moves.
