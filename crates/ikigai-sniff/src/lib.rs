@@ -40,8 +40,8 @@
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, FnEndpoint, Invocation,
-    Iri, ReprType, Representation, Request, Result, Verb,
+    space_iri, ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, FnEndpoint,
+    Invocation, Iri, ReprType, Representation, Request, Result, Verb,
 };
 
 // The media types v1 detects. `text/turtle` stands in for the whole RDF text family
@@ -299,8 +299,13 @@ fn is_text(bytes: &[u8]) -> bool {
     !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
 }
 
+/// The name [`space`] claims: `urn:iki:space:sniff`.
+pub const SPACE_ID: &str = "urn:iki:space:sniff";
+
 /// The space binding `urn:sniff` (classify opaque bytes) and `urn:transrept:auto` (sniff,
-/// then dispatch to the matching transreptor chain). Mount it in any kernel.
+/// then dispatch to the matching transreptor chain). Mount it in any kernel. It is
+/// configuration-free, so it names itself [`SPACE_ID`]; a host that binds more doors onto it
+/// drops that name (core 0.1.89) and names its own composition.
 pub fn space() -> EndpointSpace {
     EndpointSpace::new()
         .bind(
@@ -327,6 +332,7 @@ pub fn space() -> EndpointSpace {
             ),
         )
         .bind(Exact::new("urn:transrept:auto"), AutoTransrept)
+        .named(space_iri("sniff"))
 }
 
 /// `urn:transrept:auto` — sniff the piped bytes, then transrept them to `as=` by selecting

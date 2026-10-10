@@ -76,6 +76,9 @@ let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
 let kernel = Kernel::new(root);
 ```
 
+`space()` names itself `urn:iki:space:sparql` (`ikigai_sparql::SPACE_ID`); every `space_with_*`
+constructor stays anonymous, for the host to name.
+
 ## Shared-store variant
 
 `space_with_store(store: Arc<ikigai_sparql::Store>)` binds the same four IRIs — **plus

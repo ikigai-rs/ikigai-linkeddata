@@ -39,6 +39,9 @@
 //! costs nothing and keeps that guard; the remainder is pinned instead by
 //! `as_selects_the_served_type` in the crate's own tests, and named in `describe()`.
 //!
+//! `space()` is declared self-named (SPACE-NAME): it reads nothing while it is built, so it
+//! claims `urn:iki:space:sniff`, exported as `SPACE_ID`.
+//!
 //! No opt-outs, no module namespace (there is no RDF face), and NAMES runs:
 //! both ids are kebab-case.
 
@@ -67,10 +70,18 @@ fn suite() -> Suite {
 #[test]
 fn conforms() {
     let kernel = Kernel::new(Arc::new(ikigai_sniff::space()));
-    let report = suite().run_blocking(&kernel);
+    // SPACE-NAME: `space()` is configuration-free, so it names itself `urn:iki:space:sniff`,
+    // and two calls hold the same doors under that name.
+    let report = suite()
+        .self_named_space("sniff", ikigai_sniff::space)
+        .run_blocking(&kernel);
     // Printed even when clean (`--nocapture`): the report is the record.
     eprintln!("{report}");
     assert!(report.is_clean(), "{report}");
+    assert_eq!(
+        ikigai_core::space_iri("sniff").as_str(),
+        ikigai_sniff::SPACE_ID
+    );
     // The walk saw exactly the endpoints declared above. A third bound without
     // a `pure`/`cacheable` line would be held to a weaker standard; a declared
     // id that binds nothing is a stale list.

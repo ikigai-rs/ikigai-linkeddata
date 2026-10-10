@@ -19,8 +19,8 @@
 #![forbid(unsafe_code)]
 
 use ikigai_core::{
-    ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, FnEndpoint, Invocation, Iri,
-    ReprType, Representation, Result, Verb,
+    space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, FnEndpoint, Invocation,
+    Iri, ReprType, Representation, Result, Verb,
 };
 use oxrdf::{Graph, NamedOrBlankNode, Quad, Term};
 use oxrdfio::{RdfFormat, RdfParser, RdfSerializer};
@@ -240,6 +240,12 @@ impl Endpoint for DiffEndpoint {
     }
 }
 
+/// The name [`space`] claims: `urn:iki:space:rdf`.
+pub const SPACE_ID: &str = "urn:iki:space:rdf";
+
+/// The space binding `urn:rdf:union`, `urn:rdf:diff` and `urn:rdf:transrept`. It is
+/// configuration-free, so it names itself [`SPACE_ID`]; a host that binds more doors onto it
+/// drops that name (core 0.1.89) and names its own composition.
 pub fn space() -> EndpointSpace {
     EndpointSpace::new()
         .bind(Exact::new("urn:rdf:union"), UnionEndpoint)
@@ -312,6 +318,7 @@ pub fn space() -> EndpointSpace {
                         ),
                 ),
         )
+        .named(space_iri("rdf"))
 }
 
 /// Resolve a transreption request: read the RDF from `content` (piped or named), the

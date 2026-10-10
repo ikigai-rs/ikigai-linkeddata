@@ -65,8 +65,8 @@ pub mod limits;
 
 use async_trait::async_trait;
 use ikigai_core::{
-    ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation, Iri, ReprType,
-    Representation, Request, Result, Verb,
+    space_iri, ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation,
+    Iri, ReprType, Representation, Request, Result, Verb,
 };
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::{GraphName, NamedNodeRef};
@@ -97,9 +97,18 @@ pub use oxigraph::store::Store;
 /// the action manifold from offering something that can never take effect.
 ///
 /// Every evaluation runs under [`budget::DEFAULT_BUDGET`]; [`space_with_budget`] sets another.
+///
+/// This is the one configuration-free constructor here, so it is the one that names itself
+/// [`SPACE_ID`]. Every `space_with_*` stays anonymous, `space_with_budget(DEFAULT_BUDGET)`
+/// included: a name is a claim that every space carrying it holds the same doors, and a
+/// parameterized constructor's doors (a ceiling, a bound, a store) are known only to the host
+/// that chose them, so the host names those.
 pub fn space() -> EndpointSpace {
-    space_with_budget(budget::DEFAULT_BUDGET)
+    space_with_budget(budget::DEFAULT_BUDGET).named(space_iri("sparql"))
 }
+
+/// The name [`space`] claims: `urn:iki:space:sparql`.
+pub const SPACE_ID: &str = "urn:iki:space:sparql";
 
 /// [`space`] with a time budget `ceiling` other than [`budget::DEFAULT_BUDGET`]: no query
 /// these endpoints evaluate runs longer, and a request's `budget=` milliseconds can only
