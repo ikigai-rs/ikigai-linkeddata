@@ -154,12 +154,9 @@ source urn:fs:file path=migrate.ru | urn:sparql:update
   while its templates still target the real default graph would match everything and write
   nothing, silently — a documented asymmetry beats a silent no-op.
 - **`graph=` is refused**, not ignored.
-- ⚠ **`LOAD <url>` is unavailable** — deliberately. It would need oxigraph's `http-client`,
-  whose fetch never passes through `urn:httpGet`, so it is invisible to the kernel and
-  ungated by `urn:cap:net:*`; enabling it would quietly upgrade `urn:cap:sparql:update`
-  into "arbitrary outbound HTTP", a far larger grant than the scope's name claims (and it
-  would drag a TLS stack into a crate that must keep compiling to wasm32). Pull remote
-  graphs in through the kernel instead.
+- ⚠ **`LOAD <url>` is refused** — deliberately, and so is `SERVICE` in a `WHERE`. See
+  [No network from SPARQL](#no-network-from-sparql). Pull remote graphs in through the
+  kernel instead.
 
 ### Does an update cut a golden thread?
 
@@ -186,6 +183,31 @@ depends on every source's **golden thread**. Re-running the same query is a cach
 a change to any underlying graph auto-invalidates the cached result. An `http(s)://` graph
 is fetched via `urn:httpGet`, so its own cache policy propagates into the query result;
 `urn:`/`file:` graphs resolve directly.
+
+## No network from SPARQL
+
+**`SERVICE` and `LOAD` are refused on every door, before evaluation** (ledger #1083). Both
+would make oxigraph fetch over HTTP with its own client, a request that never passes through
+`urn:httpGet`, so the kernel never sees it and no `urn:cap:net:*` is consulted: a SPARQL door
+would be arbitrary outbound HTTP from inside a query string.
+
+This crate's own build has no HTTP client, but that is not enough: Cargo unifies features
+across a host's whole graph, and rudof (behind ikigai-shacl) turns on `oxigraph/http-client`,
+so ikigai-cli's build had one, and before 0.2.1 every door there sent `SERVICE` and `LOAD` to
+the network. So the refusal is code, and holds in any build:
+
+- A `SERVICE` anywhere in a query or an update's `WHERE` (inside `EXISTS`, `SILENT`, or named
+  by a variable) and any `LOAD` are an `InvalidArgument` naming `query`, `update` or
+  `content`, with nothing evaluated and nothing applied. Not `Denied`: no grant would make the
+  call succeed, so `Denied` would send the caller looking for one.
+- Every evaluator this crate builds replaces oxigraph's HTTP service handler with one that
+  refuses, so a `SERVICE` that got past the check would still make no request.
+- `FROM <iri>` and `FROM NAMED <iri>` fetch nothing: they name graphs already in the dataset.
+
+Federate through the kernel instead: list remote graphs as `graph=` sources, where the
+host's `urn:cap:net:*` applies. `tests/sparql_service_egress.rs` proves all of it against a
+local stub, in the default build and with `--features ikigai-sparql/http-client-probe`, the
+test-only feature that compiles oxigraph's client in the way a host's build does.
 
 ## Bounds on caller SPARQL
 

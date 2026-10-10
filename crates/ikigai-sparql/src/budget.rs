@@ -525,14 +525,7 @@ impl Write for CappedWriter {
 /// Refuse a parsed query whose algebra exceeds [`MAX_JOIN_OPERANDS`] or [`MAX_ALGEBRA_NODES`],
 /// naming the argument `arg` and the bound. Called after parsing and before planning.
 pub fn check_query(query: &Query, arg: &str) -> Result<()> {
-    let mut cost = Cost::default();
-    match query {
-        Query::Select { pattern, .. }
-        | Query::Ask { pattern, .. }
-        | Query::Describe { pattern, .. } => cost.pattern(pattern),
-        Query::Construct { pattern, .. } => cost.pattern(pattern),
-    }
-    cost.verdict(arg)
+    Cost::of_query(query).verdict(arg)
 }
 
 /// [`check_query`] for an update: the `WHERE` of every `DELETE`/`INSERT` operation counts
@@ -547,13 +540,35 @@ pub fn check_update(update: &Update, arg: &str) -> Result<()> {
     cost.verdict(arg)
 }
 
+/// One walk of a parsed algebra: what it costs the planner, and whether it calls `SERVICE`.
+///
+/// The walk is shared with [`crate::egress`] because it is the one traversal here that visits
+/// every pattern, including those inside an expression's `EXISTS`, and a second walker would be
+/// a second place for a new algebra node to be missed.
 #[derive(Default)]
-struct Cost {
+pub(crate) struct Cost {
     nodes: usize,
     widest_join: usize,
+    /// The first `SERVICE` the walk met, as written (`<iri>` or `?var`).
+    pub(crate) first_service: Option<String>,
 }
 
 impl Cost {
+    pub(crate) fn of_query(query: &Query) -> Self {
+        match query {
+            Query::Select { pattern, .. }
+            | Query::Ask { pattern, .. }
+            | Query::Describe { pattern, .. }
+            | Query::Construct { pattern, .. } => Self::of_pattern(pattern),
+        }
+    }
+
+    pub(crate) fn of_pattern(pattern: &GraphPattern) -> Self {
+        let mut cost = Cost::default();
+        cost.pattern(pattern);
+        cost
+    }
+
     fn verdict(&self, arg: &str) -> Result<()> {
         if self.widest_join > MAX_JOIN_OPERANDS {
             return Err(Error::InvalidArgument {
@@ -668,8 +683,12 @@ impl Cost {
                 }
                 self.pattern(inner);
             }
+            GraphPattern::Service { name, inner, .. } => {
+                self.first_service.get_or_insert_with(|| name.to_string());
+                self.nodes += 1;
+                self.pattern(inner);
+            }
             GraphPattern::Graph { inner, .. }
-            | GraphPattern::Service { inner, .. }
             | GraphPattern::Project { inner, .. }
             | GraphPattern::Distinct { inner }
             | GraphPattern::Reduced { inner }

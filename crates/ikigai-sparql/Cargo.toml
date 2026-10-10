@@ -25,7 +25,19 @@ oxigraph = { workspace = true }
 # oxigraph 0.5.11 pins `=0.4.7`, so this floor is that version and resolution unifies them.
 # `sep-0006` because oxigraph enables it and the algebra walk names `Lateral`.
 spargebra = { version = "0.4.7", features = ["sep-0006"] }
+# Named only because `DefaultServiceHandler::handle` takes an `Option<&oxiri::Iri<String>>` and
+# no oxigraph crate re-exports the type (ledger #1083, `src/egress.rs`). 0.2.11 is what oxigraph
+# 0.5.11 and spareval 0.2.7 require, so resolution unifies them on one copy.
+oxiri = "0.2.11"
 async-trait = "0.1"
+
+[features]
+# TEST-ONLY. Compiles oxigraph's HTTP client into this crate's build, which is what any host gets
+# when some other crate in its graph enables `oxigraph/http-client` (rudof_rdf does, so every
+# native host linking ikigai-shacl has it; ledger #1083). `tests/sparql_service_egress.rs` runs
+# under it in CI's `features:` job and proves SERVICE and LOAD still reach no network. Turning it
+# on gives a consumer nothing: no door here uses the client, which is the point.
+http-client-probe = ["oxigraph/http-client"]
 
 [dev-dependencies]
 # block_on for driving kernel.issue in the shared-store tests.

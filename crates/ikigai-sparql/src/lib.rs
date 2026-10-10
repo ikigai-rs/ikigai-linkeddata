@@ -68,6 +68,7 @@
 #![forbid(unsafe_code)]
 
 pub mod budget;
+mod egress;
 pub mod limits;
 
 use async_trait::async_trait;
@@ -78,7 +79,7 @@ use ikigai_core::{
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::{GraphName, NamedNodeRef};
 use oxigraph::sparql::results::{QueryResultsFormat, QueryResultsSerializer};
-use oxigraph::sparql::{CancellationToken, QueryResults, SparqlEvaluator};
+use oxigraph::sparql::{CancellationToken, QueryResults};
 use spargebra::SparqlParser;
 use std::sync::Arc;
 use std::time::Duration;
@@ -566,17 +567,18 @@ impl Endpoint for SparqlEndpoint {
 /// - **`graph=` is refused, not ignored.** Same reason as the query endpoints: this
 ///   store is the caller's, and there is nothing per-query to write to.
 ///
-/// ⚠ **`LOAD <url>` is not available**, and that is a capability property, not an
-/// oversight. It would need oxigraph's `http-client` feature, whose fetch is oxigraph's
-/// own — it never passes through `urn:httpGet`, so it is invisible to the kernel and
-/// ungated by `urn:cap:net:*`. Enabling it would silently upgrade [`CAP_UPDATE`] into
-/// "arbitrary outbound HTTP from inside the store", which is a much larger grant than
-/// the scope's name claims, and it would also drag a native TLS stack into a crate that
-/// must keep compiling to wasm32. `LOAD` fails with "HTTP client is not available"
-/// (cleanly, and — being an evaluation error — rolling the whole update back). The
-/// ikigai way to pull a remote graph in is to resolve it through the kernel, where the
-/// net capability applies: `urn:httpGet` on the query side, or a host that sources the
-/// document and sinks an `INSERT DATA` built from it.
+/// ⚠ **`LOAD <url>` and `SERVICE` are refused**, and that is a capability property, not an
+/// oversight. Either fetch would be oxigraph's own, which never passes through
+/// `urn:httpGet`, so it is invisible to the kernel and ungated by `urn:cap:net:*`: it would
+/// silently upgrade [`CAP_UPDATE`] into "arbitrary outbound HTTP from inside the store", a
+/// much larger grant than the scope's name claims. This crate's own build has no HTTP client,
+/// but a HOST's build can (Cargo unifies `oxigraph/http-client` in from rudof, ledger #1083),
+/// so the refusal is code, not a missing feature: the parsed update is checked before the
+/// transaction opens, and a `LOAD` or `SERVICE` anywhere is an `InvalidArgument` naming the
+/// argument, with nothing applied (see the private `egress` module). The ikigai way to pull a
+/// remote graph in is to resolve it through the kernel, where the net capability applies:
+/// `urn:httpGet` on the query side, or a host that sources the document and sinks an
+/// `INSERT DATA` built from it.
 ///
 /// The result is uncacheable (a Sink's result is never cached anyway) and the kernel
 /// cuts [`UPDATE_THREAD`] on success.
@@ -640,7 +642,8 @@ impl Endpoint for SparqlUpdateEndpoint {
                     .parse_update(update_str)
                     .map_err(|e| Error::Endpoint(format!("SPARQL UPDATE syntax error: {e}")))?;
                 budget::check_update(&update, arg)?;
-                SparqlEvaluator::new()
+                egress::check_update(&update, arg)?;
+                egress::evaluator()
                     .with_cancellation_token(token.clone())
                     .for_update(update)
                     .on_store(&self.store)
@@ -872,7 +875,8 @@ fn evaluate<'a>(
         .parse_query(query_str)
         .map_err(|e| Error::Endpoint(format!("SPARQL syntax error: {e}")))?;
     budget::check_query(&query, "query")?;
-    let mut prepared = SparqlEvaluator::new()
+    egress::check_query(&query, "query")?;
+    let mut prepared = egress::evaluator()
         .with_cancellation_token(token.clone())
         .for_query(query);
     // `for_query` seeds the dataset from the query's own FROM / FROM NAMED, so the union is
@@ -2087,10 +2091,12 @@ mod tests {
         }
 
         /// The harder half of "fails cleanly": an update whose operations all PARSE, and
-        /// which fails partway through EVALUATION. `LOAD` is the reachable trigger — this
-        /// build has oxigraph's `http-client` off on purpose (see [`SparqlUpdateEndpoint`])
-        /// — and it proves the transaction, not just the parser: the `INSERT DATA` that
-        /// already ran is rolled back, not committed.
+        /// which fails partway through EVALUATION. A non-`SILENT` `DROP GRAPH` of a graph
+        /// that does not exist is the trigger, in every build. (It used to be `LOAD`, which
+        /// failed only because this crate's build has no HTTP client: a host's build can,
+        /// and `LOAD` is now refused before evaluation, ledger #1083.) It proves the
+        /// transaction, not just the parser: the `INSERT DATA` that already ran is rolled
+        /// back, not committed.
         #[test]
         fn a_mid_update_failure_rolls_the_whole_transaction_back() {
             let store = Arc::new(Store::new().unwrap());
@@ -2100,7 +2106,7 @@ mod tests {
             let err = update(
                 &kernel,
                 r#"INSERT DATA { <http://ex/b> <http://ex/name> "Bob" } ;
-                   LOAD <http://example.invalid/g>"#,
+                   DROP GRAPH <http://example.invalid/absent>"#,
             )
             .unwrap_err();
             assert!(err.to_string().contains("evaluation error"), "{err}");
