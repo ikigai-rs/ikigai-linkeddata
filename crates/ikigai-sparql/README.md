@@ -249,6 +249,20 @@ replaces both.
 nine doors (it fails, with the child killed by `SIGABRT`, against 0.1.10);
 `tests/sparql_stack_measure.rs` re-measures the stack each shape costs when oxigraph moves.
 
+### Bounds on `graph=` sources
+
+The RDF parsers that load a `graph=` source recurse too: oxrdf copies a nested RDF 1.2 triple
+term once per level (Turtle, TriG, N-Triples, N-Quads, and RDF/XML's `rdf:parseType="Triple"`),
+and oxjsonld's expander recurses once per nested node object. Through 0.2.0, a source of about
+3,000 nested triple terms aborted the host through any of the four query forms, and so did
+JSON-LD 64 node objects deep in a debug build (ledger #1043). Now each source is scanned with
+[ikigai-rdf](https://crates.io/crates/ikigai-rdf)'s depth scan for the syntax it will be parsed
+as, and one nested deeper than 64 (`MAX_TURTLE_NESTING`, or `MAX_JSON_NESTING` in JSON levels)
+is refused as an `InvalidArgument` on `graph` that names the source, before it is loaded. The
+sources that pass are loaded on a thread of 16 MiB, enough for JSON-LD at the bound in a debug
+build (~4.5 MiB). `tests/sparql_graph_depth.rs` reproduces both aborts in a child process on a
+2 MiB thread.
+
 ## Time budget
 
 Through 0.1.11 nothing bounded how long a query ran, and oxigraph is slow well before it is

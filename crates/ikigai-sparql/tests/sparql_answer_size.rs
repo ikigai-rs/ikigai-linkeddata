@@ -9,13 +9,23 @@
 //!
 //! These tests use `VALUES` cross products: they need no data (no `graph=`, nothing loaded),
 //! they are exactly the CMS shape, and their row count is known in advance.
+//!
+//! Their subject is SIZE, so every space here has a generous TIME budget
+//! ([`SIZE_PROBE_BUDGET`]) and keeps the default size bounds unless a test sets its own (ledger
+//! #1043). Under the 5 s default a debug build on a slow CI runner was refused by time before
+//! it reached the size bound: PR 38's first CI run failed two of these with a `Timeout`, and
+//! forty concurrent copies at background priority on a laptop failed four.
 
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Request, Verb};
-use ikigai_sparql::budget::{AnswerBound, DEFAULT_BUDGET, DEFAULT_MAX_BYTES, DEFAULT_MAX_ROWS};
+use ikigai_sparql::budget::{AnswerBound, DEFAULT_MAX_BYTES, DEFAULT_MAX_ROWS};
 use ikigai_sparql::Store;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
+
+/// The time-budget ceiling of every space here, so a slow runner reads as slow and never as a
+/// refusal by time. The largest answer here takes ~2 s in a debug build on a laptop.
+const SIZE_PROBE_BUDGET: Duration = Duration::from_secs(120);
 
 /// `SELECT * { VALUES ?v0 { 1 … n } VALUES ?v1 { 1 … n } … }`: `n^vars` rows from a text of a
 /// few bytes per value.
@@ -51,13 +61,16 @@ fn construct_product(n: usize, m: usize) -> String {
     )
 }
 
+/// The default space's size bounds ([`AnswerBound::DEFAULT`]), under [`SIZE_PROBE_BUDGET`].
 fn default_kernel() -> Kernel {
-    Kernel::new(Arc::new(ikigai_sparql::space()))
+    Kernel::new(Arc::new(ikigai_sparql::space_with_budget(
+        SIZE_PROBE_BUDGET,
+    )))
 }
 
 fn bounded_kernel(rows: u64, bytes: u64) -> Kernel {
     Kernel::new(Arc::new(ikigai_sparql::space_with_bounds(
-        DEFAULT_BUDGET,
+        SIZE_PROBE_BUDGET,
         AnswerBound::new(rows, bytes).unwrap(),
     )))
 }
@@ -117,22 +130,19 @@ fn an_answer_past_the_default_byte_bound_is_refused_not_sent() {
 }
 
 /// Counting stops AT the bound, not at the deadline: a billion-row product is refused for its
-/// size long before the time budget would have stopped it.
+/// size long before the time budget would have stopped it. A refusal by size is the whole
+/// proof: had counting not stopped at the bound, the product would have run to the deadline
+/// and been refused with a `Timeout`, which `assert_too_large` does not accept. (This used to
+/// time the refusal against the 5 s default budget as well, and a slow CI runner took 5.2 s.)
 #[test]
 fn an_unbounded_product_is_refused_at_the_bound_not_at_the_deadline() {
     let text = product(3, 1000);
-    let started = Instant::now();
     assert_too_large(
         issue(
             &default_kernel(),
             request("select", &[("query", &text), ("as", "text/csv")]),
         ),
         "rows",
-    );
-    assert!(
-        started.elapsed() < DEFAULT_BUDGET,
-        "{:?}",
-        started.elapsed()
     );
 }
 
@@ -300,7 +310,7 @@ fn the_shared_store_space_is_bounded_too() {
     ikigai_sparql::load_vocabulary(&store).unwrap();
     let kernel = Kernel::new(Arc::new(ikigai_sparql::space_with_store_and_bounds(
         store,
-        DEFAULT_BUDGET,
+        SIZE_PROBE_BUDGET,
         AnswerBound::new(5, DEFAULT_MAX_BYTES).unwrap(),
     )));
     assert_too_large(

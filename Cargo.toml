@@ -28,3 +28,8 @@ ikigai-vocab = "0.1.22"
 oxrdf = "0.3"
 oxrdfio = "0.2"
 oxigraph = { version = "0.5", default-features = false }
+# ikigai-sparql scans each `graph=` source with ikigai-rdf's depth scans before loading it
+# (ledger #1043). 0.2.1 is the first with `check_json_nesting` (ledger #1038). Path AND version:
+# published, the version is what a consumer resolves, so ikigai-rdf 0.2.1 goes to crates.io
+# before ikigai-sparql 0.2.1 does. The workspace moves both together, so move this with it.
+ikigai-rdf = { path = "crates/ikigai-rdf", version = "0.2.1" }
