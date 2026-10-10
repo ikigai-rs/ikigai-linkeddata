@@ -55,7 +55,7 @@ let root: Arc<dyn Space> = Arc::new(Fallback::new(vec![
 let kernel = Kernel::new(root);
 ```
 
-`space()` names itself `urn:iki:space:rdf` (`ikigai_rdf::SPACE_ID`).
+Since 0.2.0, `space()` names itself `urn:iki:space:rdf` (`ikigai_rdf::SPACE_ID`).
 
 ## Caching
 
