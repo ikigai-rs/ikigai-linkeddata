@@ -98,8 +98,8 @@ fn document(syntax: &str, levels: usize) -> String {
                  <ex:p rdf:resource=\"urn:o\"/>{close}</rdf:Description></rdf:RDF>\n"
             )
         }
-        // Not a triple term (oxjsonld has none): node objects nested `levels` deep. See
-        // `json_ld_nesting_still_aborts_the_transreptor` at the end.
+        // Not a triple term (oxjsonld has none): node objects nested `levels` deep, `levels + 1`
+        // JSON levels. See the JSON-LD tests at the end (ledger #1038).
         "jsonld" => format!(
             "{}{{\"@id\":\"urn:ex:o\"}}{}",
             "{\"@id\":\"urn:ex:s\",\"urn:ex:p\":".repeat(levels),
@@ -339,22 +339,45 @@ fn brackets_in_literals_and_comments_are_not_nesting() {
     }
 }
 
-// ------------------------------------------------------------------ NOT fixed here
+// ------------------------------------------------------------------ JSON-LD (ledger #1038)
 
-/// ⚠ A DIFFERENT recursion at the same door, found by this file's syntax sweep and NOT fixed by
-/// this arc (ledger #992 is triple terms; oxjsonld builds none). oxjsonld's expansion recurses
-/// over nested node objects, so `{"@id":…,"urn:ex:p":{"@id":…,"urn:ex:p":{…}}}` aborted the
-/// child through `urn:rdf:transrept` and `urn:transrept:auto` at 40 levels (about 1.3 KB) in a
-/// debug build and between 800 and 1600 in a release one (2 MiB thread, 2026-10-10). A 64 bound
-/// would not cover a debug build, so the fix needs its own measurement. Run with `--ignored`.
+/// A DIFFERENT recursion at the same doors, found by this file's syntax sweep (ledger #992 is
+/// triple terms; oxjsonld builds none). oxjsonld's expansion recurses over nested node objects,
+/// so `{"@id":…,"urn:ex:p":{"@id":…,"urn:ex:p":{…}}}` aborted the child through
+/// `urn:rdf:transrept` and `urn:transrept:auto` at 29 levels (about 1 KB) in a debug build and
+/// at 1,021 in a release one (2 MiB thread; `tests/jsonld_depth_measure.rs`). Now refused past
+/// `MAX_JSON_NESTING`, counted in JSON levels.
 #[test]
-#[ignore = "reproduces a JSON-LD nesting abort this arc reports and does not fix"]
-fn json_ld_nesting_still_aborts_the_transreptor() {
-    for door in ["transrept", "auto"] {
-        let outcome = probe(door, "jsonld", 3000);
+fn json_ld_nesting_is_refused_and_aborts_nothing() {
+    for door in ["transrept", "transrept-nt", "transrept-html", "auto"] {
+        assert_refused(&probe(door, "jsonld", 3000), "content", door);
+    }
+}
+
+/// At the bound the doors answer, on the 2 MiB thread the probe gives them: a debug build needs
+/// ~4.5 MiB for 64 levels, so this passes only because the parse runs on its own sized thread.
+/// `document("jsonld", n)` nests `n + 1` JSON levels (the innermost node is one more).
+#[test]
+fn json_ld_at_the_bound_is_answered_on_a_small_thread_and_one_past_is_refused() {
+    for door in ["transrept", "transrept-nt", "transrept-html", "auto"] {
+        let ok = probe(door, "jsonld", BOUND - 1);
+        assert!(ok.starts_with("ok "), "{door} at the bound: {ok}");
+        let over = probe(door, "jsonld", BOUND);
         assert!(
-            outcome.starts_with("err invalid argument `content`"),
-            "{door}: {outcome}"
+            over.starts_with("err invalid argument `content`")
+                && over.contains("deeper than 64 (MAX_JSON_NESTING)"),
+            "{door} past the bound: {over}"
         );
+    }
+}
+
+#[test]
+fn brackets_in_json_ld_strings_are_not_nesting() {
+    let deep = "[{".repeat(500);
+    let text =
+        format!("{{\"@id\":\"urn:ex:s\",\"urn:ex:p\":[\"{deep}\",\"a\\\"{deep}\",\"\\\\\"]}}");
+    for door in ["transrept", "auto"] {
+        let answer = issue(door, text.clone()).unwrap_or_else(|e| panic!("{door}: {e}"));
+        assert!(answer.contains("urn:ex:s"), "{door}: {answer}");
     }
 }

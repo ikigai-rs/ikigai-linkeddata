@@ -67,6 +67,14 @@ carried it (`content` or `with`): `<<` nesting in Turtle, N-Triples, N-Quads and
 nested `rdf:parseType` elements in RDF/XML. The scans are exported as
 `check_turtle_nesting` and `check_rdfxml_nesting`.
 
+JSON-LD has no triple terms, but its expander recurses once per nested node object (a debug
+build aborted at 29 levels on a 2 MiB thread, a release one at about 1,000), and re-reads a
+node's content once per level. So `urn:rdf:transrept` refuses JSON-LD that nests objects and
+arrays deeper than `MAX_JSON_NESTING` (64; the W3C JSON-LD test suite's deepest document nests
+10), and parses what it admits on a thread of its own (`JSON_LD_STACK`, 16 MiB), so a debug
+build answers what a release one does. On wasm the parse runs inline and the bound alone
+applies. The scan is exported as `check_json_nesting`.
+
 ## Caching
 
 Transreption is a pure function of its input bytes, so its output is *as cacheable as its
