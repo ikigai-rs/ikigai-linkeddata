@@ -9,7 +9,9 @@ A graph can be any resolvable resource: a remote document via `urn:httpGet`, a f
 store's named graph. Federation is just listing graphs — `graph=` takes a comma- or
 space-separated list, each loaded as a named graph (named by its URI) with the query's
 default graph set to their union, so simple queries span every source and
-`GRAPH <uri> { … }` addresses one. Built on [`oxigraph`](https://crates.io/crates/oxigraph)
+`GRAPH <uri> { … }` addresses one. A query that states its own dataset gets exactly that
+dataset instead: `FROM <uri>` makes one source the default graph, and `FROM NAMED` limits what
+`GRAPH` can reach (alone, it leaves the default graph empty, as SPARQL 1.1 says). Built on [`oxigraph`](https://crates.io/crates/oxigraph)
 0.5's in-memory store (no rocksdb), so it runs natively and in the browser.
 
 ## Endpoints
@@ -108,7 +110,8 @@ The contract differs deliberately from `space()`:
 - **Results are uncacheable** — see [Writing: `urn:sparql:update`](#writing-urnsparqlupdate)
   for why an update's golden thread does not yet change that.
 - A *query*'s default graph is the union of all graphs in the store (named graphs are
-  visible to plain queries; `GRAPH <uri> { … }` addresses one) — same as `space()`. An
+  visible to plain queries; `GRAPH <uri> { … }` addresses one) — same as `space()` — unless
+  the query states a dataset: `FROM` / `FROM NAMED` are honored, never replaced by the union. An
   *update* gets plain SPARQL 1.1 semantics instead; see below.
 
 ## Writing: `urn:sparql:update`

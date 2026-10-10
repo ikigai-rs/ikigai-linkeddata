@@ -6,6 +6,9 @@
 //! graph). Federation is just listing graphs: `graph=` takes a comma/space-separated list,
 //! each loaded as a named graph (named by its URI) with the query's default graph set to
 //! their union — so simple queries span all of them and `GRAPH <uri> { … }` addresses one.
+//! A query that states its own dataset (`FROM <uri>`, `FROM NAMED <uri>`) gets exactly that
+//! dataset instead, on both variants (ledger #840; see `evaluate`). The always-loaded
+//! vocabulary below is then in the default graph only if a `FROM <urn:ikigai:vocab>` names it.
 //!
 //! The **ikigai vocabulary** (`urn:ikigai:vocab` — the `ns#` ontology: `ik:Transreptor
 //! rdfs:subClassOf ik:Endpoint` and the property defs) is **always loaded** as a named
@@ -162,7 +165,8 @@ pub fn space_with_bounds(ceiling: Duration, answer: budget::AnswerBound) -> Endp
 /// - **Query semantics differ from update semantics, by design.** A *query*'s default
 ///   graph is the union of all graphs in the store, so triples in named graphs are
 ///   visible to plain queries and `GRAPH <uri> { … }` still addresses one — the same
-///   as [`space`]. An *update* gets plain SPARQL 1.1 semantics: no union, so
+///   as [`space`], and like it, a query that states `FROM` / `FROM NAMED` gets exactly that
+///   dataset instead. An *update* gets plain SPARQL 1.1 semantics: no union, so
 ///   `DELETE WHERE { ?s ?p ?o }` touches the real default graph only and named graphs
 ///   need an explicit `GRAPH ?g`. ⚠ That asymmetry is a trap worth knowing (SELECT
 ///   sees a quad the twin DELETE will not remove), and it is still the right call:
@@ -779,9 +783,25 @@ fn query_within_budget(
     answer
 }
 
-/// Parse and run a query over `store` with the default graph set to the union of all
-/// its graphs — so a query without an explicit `GRAPH`/`FROM` spans every graph, and
-/// `GRAPH <uri> { … }` still addresses one. Both variants share these semantics.
+/// Parse and run a query over `store`. A query that states no dataset gets the union of all
+/// the store's graphs as its default graph — so it spans every graph, and `GRAPH <uri> { … }`
+/// still addresses one. Both variants share these semantics.
+///
+/// ★ **A query that DOES state a dataset gets exactly that dataset** (ledger #840). `FROM <g>`
+/// makes `g` the default graph, `FROM NAMED <g>` limits what `GRAPH` can reach, and
+/// `FROM NAMED` alone leaves the default graph EMPTY (SPARQL 1.1 section 13.2). This used to
+/// apply the union unconditionally, which overwrote the default graph the clause had set: `FROM
+/// <g>` answered with every graph's rows and no error, a wrong answer that looks right.
+///
+/// Honored rather than refused, unlike `ikigai-store`'s scoped doors, because the reason those
+/// refuse does not hold here. A scoped door CONFINES the dataset to the graph its caller's
+/// capability names, so it cannot honor `FROM <other>`, and answering it with the confined
+/// graph's rows would be the same wrong answer this was; refusing is the honest outcome there.
+/// Neither variant here confines anything: the caller of a shared-store query already
+/// reads every graph through `GRAPH <g>` or the union, and the per-query dataset holds only
+/// the sources the caller listed. `FROM` narrows what the caller can already see; it never
+/// widens it. So the clause gets its standard meaning, which oxigraph implements, and a
+/// federation can name one of its own `graph=` sources as the default graph.
 ///
 /// Parsed with spargebra directly, so the algebra can be measured against the budget's
 /// bounds BEFORE oxigraph plans it: planning cannot be cancelled (see [`budget`]).
@@ -797,7 +817,11 @@ fn evaluate<'a>(
     let mut prepared = SparqlEvaluator::new()
         .with_cancellation_token(token.clone())
         .for_query(query);
-    prepared.dataset_mut().set_default_graph_as_union();
+    // `for_query` seeds the dataset from the query's own FROM / FROM NAMED, so the union is
+    // the right default only when there were none.
+    if prepared.dataset().is_default_dataset() {
+        prepared.dataset_mut().set_default_graph_as_union();
+    }
     prepared
         .on_store(store)
         .execute()
