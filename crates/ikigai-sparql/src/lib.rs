@@ -49,6 +49,14 @@
 //! [`budget::MAX_ALGEBRA_NODES`]. The host sets the budget's ceiling when it builds the space
 //! ([`space_with_budget`], [`space_with_store_and_budget`]); a request's `budget=` can only
 //! lower it. See [`budget`] for what it does not cover.
+//!
+//! **And every answer is bounded in SIZE** (ledger #970): at most [`budget::DEFAULT_MAX_ROWS`]
+//! rows (solutions, or triples) and [`budget::DEFAULT_MAX_BYTES`] serialized bytes, counted
+//! while it is serialized and refused, never truncated, past either one. `ASK` is exempt. The
+//! host raises the bound, up to [`budget::AnswerBound::CEILING`], when it builds the space
+//! ([`space_with_bounds`], [`space_with_store_and_bounds`]); a request's `max_rows=` and
+//! `max_bytes=` can only lower it. Every bounding argument is read inline or refused
+//! ([`budget::inline_bound`]).
 
 #![forbid(unsafe_code)]
 
@@ -98,6 +106,16 @@ pub fn space() -> EndpointSpace {
 /// lower it (see [`budget::effective_budget`]). A host serving anonymous callers builds its
 /// space with a ceiling it can afford, or stamps a small `budget=` at that door.
 pub fn space_with_budget(ceiling: Duration) -> EndpointSpace {
+    space_with_bounds(ceiling, budget::AnswerBound::DEFAULT)
+}
+
+/// [`space_with_budget`] with an answer-size bound other than [`budget::AnswerBound::DEFAULT`]:
+/// no answer these endpoints serialize holds more than `answer`'s rows or bytes, and a
+/// request's `max_rows=` and `max_bytes=` can only lower it (see [`budget::effective_answer`]).
+/// The bound itself is at most [`budget::AnswerBound::CEILING`]: [`budget::AnswerBound::new`]
+/// refuses more. This is how a host RAISES the bound, for a trusted door; a host serving
+/// anonymous callers keeps the default, or stamps smaller `max_rows=`/`max_bytes=` at that door.
+pub fn space_with_bounds(ceiling: Duration, answer: budget::AnswerBound) -> EndpointSpace {
     let mut space = EndpointSpace::new();
     for (verb, id) in FORMS {
         space = space.bind(
@@ -107,6 +125,7 @@ pub fn space_with_budget(ceiling: Duration) -> EndpointSpace {
                 id,
                 shared: None,
                 ceiling,
+                answer,
             },
         );
     }
@@ -166,6 +185,17 @@ pub fn space_with_store(store: Arc<Store>) -> EndpointSpace {
 /// [`space_with_store`] with a time budget `ceiling` other than [`budget::DEFAULT_BUDGET`],
 /// for all five endpoints. A request's `budget=` milliseconds can only lower it.
 pub fn space_with_store_and_budget(store: Arc<Store>, ceiling: Duration) -> EndpointSpace {
+    space_with_store_and_bounds(store, ceiling, budget::AnswerBound::DEFAULT)
+}
+
+/// [`space_with_store_and_budget`] with an answer-size bound other than
+/// [`budget::AnswerBound::DEFAULT`] for the four query forms (an update's answer is a one-line
+/// receipt, and is not bounded). See [`space_with_bounds`].
+pub fn space_with_store_and_bounds(
+    store: Arc<Store>,
+    ceiling: Duration,
+    answer: budget::AnswerBound,
+) -> EndpointSpace {
     let mut space = EndpointSpace::new();
     for (verb, id) in FORMS {
         space = space.bind(
@@ -175,6 +205,7 @@ pub fn space_with_store_and_budget(store: Arc<Store>, ceiling: Duration) -> Endp
                 id,
                 shared: Some(Arc::clone(&store)),
                 ceiling,
+                answer,
             },
         );
     }
@@ -341,6 +372,9 @@ struct SparqlEndpoint {
     shared: Option<Arc<Store>>,
     /// The most time one evaluation may take; a request's `budget=` can only lower it.
     ceiling: Duration,
+    /// The largest answer one evaluation may serialize; a request's `max_rows=` and
+    /// `max_bytes=` can only lower it.
+    answer: budget::AnswerBound,
 }
 
 #[async_trait]
@@ -352,7 +386,12 @@ impl Endpoint for SparqlEndpoint {
         // Before anything else, `graph=` sources included: a text the parser cannot be
         // trusted with is refused without costing a single resolution (ledger #962).
         limits::check_sparql(query_str, "query")?;
-        let budget = budget::effective_budget(inv.inline_str("budget").ok(), self.ceiling)?;
+        let budget = budget::effective_budget(budget::inline_bound(inv, "budget")?, self.ceiling)?;
+        let answer = budget::effective_answer(
+            budget::inline_bound(inv, "max_rows")?,
+            budget::inline_bound(inv, "max_bytes")?,
+            self.answer,
+        )?;
         let as_type = inv.inline_str("as").ok();
 
         // The shared-store variant: run the query over the caller-owned live store.
@@ -367,7 +406,7 @@ impl Endpoint for SparqlEndpoint {
                         .to_string(),
                 ));
             }
-            let (media, bytes) = query_within_budget(query_str, store, as_type, budget)?;
+            let (media, bytes) = query_within_budget(query_str, store, as_type, budget, answer)?;
             return Ok(Representation::new(utf8_repr(&media), bytes));
         }
 
@@ -398,7 +437,7 @@ impl Endpoint for SparqlEndpoint {
                 .map_err(|e| Error::Endpoint(format!("loading <{uri}>: {e}")))?;
         }
 
-        let (media, bytes) = query_within_budget(query_str, &store, as_type, budget)?;
+        let (media, bytes) = query_within_budget(query_str, &store, as_type, budget, answer)?;
         Ok(Representation::new(utf8_repr(&media), bytes).cacheable())
     }
 
@@ -451,7 +490,7 @@ impl Endpoint for SparqlEndpoint {
                     .optional(),
             )
         };
-        let desc = desc.input(budget_arg(self.ceiling)).input(
+        let desc = answer_args(desc.input(budget_arg(self.ceiling)), self.answer).input(
             ArgSpec::new("as")
                 .summary(
                     "result representation: SELECT/ASK → application/sparql-results+json \
@@ -547,7 +586,7 @@ impl Endpoint for SparqlUpdateEndpoint {
             "content"
         };
         limits::check_sparql(update_str, arg)?;
-        let budget = budget::effective_budget(inv.inline_str("budget").ok(), self.ceiling)?;
+        let budget = budget::effective_budget(budget::inline_bound(inv, "budget")?, self.ceiling)?;
 
         let before = self
             .store
@@ -676,6 +715,34 @@ fn budget_arg(ceiling: Duration) -> ArgSpec {
         .optional()
 }
 
+/// The `max_rows=` and `max_bytes=` arguments every query form declares: at most the space's
+/// answer bound. Declared on `urn:sparql:ask` too, because the query text, not the IRI, decides
+/// the form, and only an `ASK` answer is exempt.
+fn answer_args(desc: Description, bound: budget::AnswerBound) -> Description {
+    desc.input(
+        ArgSpec::new("max_rows")
+            .summary(format!(
+                "optional: the most rows the answer may hold (solutions of a SELECT, triples of a \
+                 CONSTRUCT or DESCRIBE; an ASK is exempt). A larger answer is refused, never \
+                 truncated. It can only LOWER this space's bound ({} rows), never raise it",
+                bound.rows()
+            ))
+            .class(XSD_POSITIVE_INTEGER)
+            .optional(),
+    )
+    .input(
+        ArgSpec::new("max_bytes")
+            .summary(format!(
+                "optional: the most serialized bytes the answer may hold (an ASK is exempt). A \
+                 larger answer is refused, never truncated. It can only LOWER this space's \
+                 bound ({} bytes), never raise it",
+                bound.bytes()
+            ))
+            .class(XSD_POSITIVE_INTEGER)
+            .optional(),
+    )
+}
+
 /// Parse, evaluate and serialize `query_str` over `store` on a thread whose stack is sized
 /// for the text ([`limits::on_sparql_stack`]), within `budget`. All three steps recurse, and
 /// evaluation is lazy — rows are produced while they are serialized — so all three run there,
@@ -683,16 +750,18 @@ fn budget_arg(ceiling: Duration) -> ArgSpec {
 /// [`limits::check_sparql`].
 ///
 /// A query the deadline catches is refused whatever it returned: it either stopped part-way
-/// (and a partial answer is not an answer) or finished late, past a bound that refuses.
+/// (and a partial answer is not an answer) or finished late, past a bound that refuses. An
+/// answer that grows past `bound` is refused the same way, as it grows (ledger #970).
 fn query_within_budget(
     query_str: &str,
     store: &Store,
     as_type: Option<&str>,
     budget: Duration,
+    bound: budget::AnswerBound,
 ) -> Result<(String, Vec<u8>)> {
     let (answer, fired) = budget::with_deadline(budget, |token| {
         limits::on_sparql_stack(query_str, || {
-            serialize_results(evaluate(query_str, store, token)?, as_type, token)
+            serialize_results(evaluate(query_str, store, token)?, as_type, token, bound)
         })
     })?;
     if fired {
@@ -735,30 +804,43 @@ fn stopped() -> Error {
 /// Serialize query results by their kind, honoring the `as` representation, checking the
 /// budget's `token` once per row or triple: oxigraph checks it only where it touches the
 /// dataset, and a join can produce many rows between two touches.
+///
+/// And counting the answer against `bound` as it is produced (ledger #970): the row past
+/// `bound.rows()` is refused before it is serialized, and every write goes through a
+/// [`budget::CappedWriter`] that refuses the one past `bound.bytes()`. Either way the answer is
+/// [`budget::too_large`] and nothing of it is returned. `ASK` is exempt: one boolean.
 fn serialize_results(
     results: QueryResults,
     as_type: Option<&str>,
     token: &CancellationToken,
+    bound: budget::AnswerBound,
 ) -> Result<(String, Vec<u8>)> {
     let io = |e: std::io::Error| Error::Endpoint(format!("serialize: {e}"));
     match results {
         QueryResults::Solutions(solutions) => {
             let format = results_format_or_default(as_type)?;
             let variables = solutions.variables().to_vec();
-            let mut serializer = QueryResultsSerializer::from_format(format)
-                .serialize_solutions_to_writer(Vec::new(), variables)
-                .map_err(io)?;
-            for solution in solutions {
-                if token.is_cancelled() {
-                    return Err(stopped());
+            let mut out = budget::CappedWriter::new(bound.bytes());
+            let written = (|| {
+                let mut serializer = QueryResultsSerializer::from_format(format)
+                    .serialize_solutions_to_writer(&mut out, variables)
+                    .map_err(io)?;
+                let mut rows: u64 = 0;
+                for solution in solutions {
+                    if token.is_cancelled() {
+                        return Err(stopped());
+                    }
+                    rows += 1;
+                    if rows > bound.rows() {
+                        return Err(budget::too_large(budget::Measure::Rows, bound.rows()));
+                    }
+                    let solution = solution.map_err(|e| Error::Endpoint(format!("query: {e}")))?;
+                    serializer.serialize(&solution).map_err(io)?;
                 }
-                let solution = solution.map_err(|e| Error::Endpoint(format!("query: {e}")))?;
-                serializer.serialize(&solution).map_err(io)?;
-            }
-            Ok((
-                format.media_type().to_string(),
-                serializer.finish().map_err(io)?,
-            ))
+                serializer.finish().map_err(io)?;
+                Ok(())
+            })();
+            capped(written, out, bound).map(|bytes| (format.media_type().to_string(), bytes))
         }
         QueryResults::Boolean(value) => {
             let format = results_format_or_default(as_type)?;
@@ -769,22 +851,42 @@ fn serialize_results(
         }
         QueryResults::Graph(triples) => {
             let format = graph_format_or_default(as_type)?;
-            let mut serializer = RdfSerializer::from_format(format).for_writer(Vec::new());
-            for triple in triples {
-                if token.is_cancelled() {
-                    return Err(stopped());
+            let mut out = budget::CappedWriter::new(bound.bytes());
+            let written = (|| {
+                let mut serializer = RdfSerializer::from_format(format).for_writer(&mut out);
+                let mut rows: u64 = 0;
+                for triple in triples {
+                    if token.is_cancelled() {
+                        return Err(stopped());
+                    }
+                    rows += 1;
+                    if rows > bound.rows() {
+                        return Err(budget::too_large(budget::Measure::Triples, bound.rows()));
+                    }
+                    let triple = triple.map_err(|e| Error::Endpoint(format!("query: {e}")))?;
+                    serializer
+                        .serialize_quad(&triple.in_graph(GraphName::DefaultGraph))
+                        .map_err(io)?;
                 }
-                let triple = triple.map_err(|e| Error::Endpoint(format!("query: {e}")))?;
-                serializer
-                    .serialize_quad(&triple.in_graph(GraphName::DefaultGraph))
-                    .map_err(io)?;
-            }
-            Ok((
-                format.media_type().to_string(),
-                serializer.finish().map_err(io)?,
-            ))
+                serializer.finish().map_err(io)?;
+                Ok(())
+            })();
+            capped(written, out, bound).map(|bytes| (format.media_type().to_string(), bytes))
         }
     }
+}
+
+/// The answer a serialization into `out` produced: its bytes, or the byte bound's refusal when
+/// `out` refused a write, whatever error the serializer made of that refusal.
+fn capped(
+    written: Result<()>,
+    out: budget::CappedWriter,
+    bound: budget::AnswerBound,
+) -> Result<Vec<u8>> {
+    if out.over() {
+        return Err(budget::too_large(budget::Measure::Bytes, bound.bytes()));
+    }
+    written.map(|()| out.into_bytes())
 }
 
 /// The SELECT/ASK format for an `as` the caller either gave or did not.
@@ -1004,7 +1106,8 @@ mod tests {
         }
         let token = CancellationToken::new();
         let results = evaluate(query, &store, &token).unwrap();
-        let (media, bytes) = serialize_results(results, as_type, &token).unwrap();
+        let (media, bytes) =
+            serialize_results(results, as_type, &token, budget::AnswerBound::DEFAULT).unwrap();
         (media, String::from_utf8(bytes).unwrap())
     }
 
@@ -1051,7 +1154,13 @@ mod tests {
             &token,
         )
         .unwrap();
-        let (_, bytes) = serialize_results(results, Some("text/csv"), &token).unwrap();
+        let (_, bytes) = serialize_results(
+            results,
+            Some("text/csv"),
+            &token,
+            budget::AnswerBound::DEFAULT,
+        )
+        .unwrap();
         assert!(String::from_utf8(bytes).unwrap().contains("Ada"));
     }
 
@@ -1070,6 +1179,7 @@ mod tests {
                         id,
                         shared,
                         ceiling,
+                        answer: budget::AnswerBound::DEFAULT,
                     }
                     .describe()
                 })
@@ -1088,6 +1198,45 @@ mod tests {
         }
     }
 
+    /// The four query forms offer `max_rows=` and `max_bytes=`: optional, typed, and saying the
+    /// space's bound (ledger #970). The update, whose answer is a one-line receipt, does not.
+    #[test]
+    fn every_query_form_declares_its_answer_bounds_and_the_update_does_not() {
+        let store = Arc::new(Store::new().unwrap());
+        let answer = budget::AnswerBound::new(4321, 8765).unwrap();
+        for (verb, id) in FORMS {
+            for shared in [None, Some(Arc::clone(&store))] {
+                let desc = SparqlEndpoint {
+                    verb,
+                    id,
+                    shared,
+                    ceiling: budget::DEFAULT_BUDGET,
+                    answer,
+                }
+                .describe();
+                for (name, says) in [("max_rows", "4321 rows"), ("max_bytes", "8765 bytes")] {
+                    let arg = desc
+                        .inputs
+                        .iter()
+                        .find(|a| a.name == name)
+                        .unwrap_or_else(|| panic!("{} offers no {name}=", desc.id));
+                    assert!(!arg.required, "{}", desc.id);
+                    assert_eq!(arg.class.as_deref(), Some(XSD_POSITIVE_INTEGER));
+                    assert!(arg.summary.contains(says), "{}", arg.summary);
+                }
+            }
+        }
+        let update = SparqlUpdateEndpoint {
+            store,
+            ceiling: budget::DEFAULT_BUDGET,
+        }
+        .describe();
+        assert!(update
+            .inputs
+            .iter()
+            .all(|a| a.name != "max_rows" && a.name != "max_bytes"));
+    }
+
     /// Every bound `urn:sparql:{verb}` must project a DISTINCT description id (and name) —
     /// else all four collide to one catalog subject and one MCP tool (the 4× dupe that F4
     /// fixed). Guards against the single-constant id regressing back in.
@@ -1100,6 +1249,7 @@ mod tests {
                 id,
                 shared: None,
                 ceiling: budget::DEFAULT_BUDGET,
+                answer: budget::AnswerBound::DEFAULT,
             })
             .collect();
         // describe().id and name() agree, and all four are distinct.
@@ -1122,6 +1272,7 @@ mod tests {
             id: "sparql-select",
             shared: None,
             ceiling: budget::DEFAULT_BUDGET,
+            answer: budget::AnswerBound::DEFAULT,
         }
         .describe();
         let required: Vec<&str> = desc
@@ -1178,7 +1329,8 @@ mod tests {
         }
         let token = CancellationToken::new();
         let results = evaluate(query, &store, &token).unwrap();
-        serialize_results(results, as_type, &token).map(|(media, _)| media)
+        serialize_results(results, as_type, &token, budget::AnswerBound::DEFAULT)
+            .map(|(media, _)| media)
     }
 
     #[test]
@@ -1591,6 +1743,7 @@ mod tests {
                 id: "sparql-select",
                 shared: Some(Arc::clone(&store)),
                 ceiling: budget::DEFAULT_BUDGET,
+                answer: budget::AnswerBound::DEFAULT,
             }
             .describe();
             assert!(

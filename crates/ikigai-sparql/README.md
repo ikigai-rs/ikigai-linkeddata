@@ -30,6 +30,11 @@ distinct, discoverable IRIs. Each accepts the same arguments:
 | `graph` | one or more graph source IRIs, comma- or space-separated; each resolved **through the kernel** and loaded as a named graph |
 | `as` | result representation (see below) |
 | `budget` | optional: milliseconds; can only **lower** the space's time budget (see [Time budget](#time-budget)) |
+| `max_rows` | optional: rows (solutions, or triples); can only **lower** the space's answer bound (see [Answer size](#answer-size)) |
+| `max_bytes` | optional: serialized bytes; can only **lower** the space's answer bound |
+
+`budget`, `max_rows` and `max_bytes` are read only as inline values: one given by reference is
+refused, never ignored (see [Bounds come inline](#bounds-come-inline-or-not-at-all)).
 
 ### `as` representations
 
@@ -303,11 +308,72 @@ applied — never as a timeout for a write that happened.
   470 triples ran 4 s past its cancellation. The same product WITHOUT the aggregate stops at
   the deadline, because its rows reach the crate's serializer. Closing this needs oxigraph to
   check the token in those loops.
-- **The size of an answer.** The budget bounds how long rows are produced, not how many: a
-  cross product serializes millions of rows a second into memory until the deadline.
+- **The size of an answer.** The budget bounds how long rows are produced, not how many.
+  That is the [answer bound](#answer-size)'s job, below.
 - **Resolving `graph=` sources**, which are other endpoints' requests under their own
   policies; the budget starts when parsing starts.
 - **wasm**, which has no threads: no watchdog runs there, and only the algebra bounds apply.
+
+## Answer size
+
+Through 0.1.12 nothing bounded how LARGE an answer was. A deadline bounds how long rows are
+produced, not how many: a 939-byte `VALUES` cross product (three lists of 100, no data needed)
+answered with **275 MB of JSON in 680 ms** (release build), well inside the 5 s budget, and
+every byte was held in memory before the first one left. ikigai-cms-web measured the same
+shape answering 272 MB through its anonymous door.
+
+Every answer is now bounded in size, and **refused, never truncated**, past the bound:
+
+| bound | default | ceiling | counts |
+| --- | --- | --- | --- |
+| rows (`budget::DEFAULT_MAX_ROWS`) | 100,000 | 10,000,000 (`CEILING_MAX_ROWS`) | solutions of a `SELECT`; triples of a `CONSTRUCT` or `DESCRIBE` |
+| bytes (`budget::DEFAULT_MAX_BYTES`) | 16 MiB | 1 GiB (`CEILING_MAX_BYTES`) | the serialized answer, every form |
+
+`ASK` is exempt: its answer is one boolean. Both bounds are counted **while the answer is
+serialized** — the row past the bound is refused before it is written, and every write the
+serializer makes goes through a writer that refuses the one past the byte bound — so an
+answer never grows in memory past its bound. The same 939-byte query is now refused in
+127 ms. The refusal is `InvalidArgument` on `query`, the kind the algebra bounds use:
+
+```text
+invalid argument `query`: the answer exceeds 100000 rows; add LIMIT, narrow the query, or ask
+the host for more. It was refused, not truncated: no part of it was sent (ledger #970). A
+request's `max_rows=` can only lower this bound
+```
+
+(`triples` in place of `rows` for a graph answer; `bytes` and `max_bytes=` for the byte bound.)
+The heaviest legitimate answer found in the ecosystem is 11,445 triples. A caller that wants
+more pages with `LIMIT` and `OFFSET`.
+
+### How a host raises it
+
+```rust
+use ikigai_sparql::budget::{AnswerBound, DEFAULT_BUDGET};
+
+// A trusted door: a million rows and 256 MiB. AnswerBound::new refuses more than the ceiling.
+let bound = AnswerBound::new(1_000_000, 256 << 20)?;
+let space = ikigai_sparql::space_with_bounds(DEFAULT_BUDGET, bound);
+let shared = ikigai_sparql::space_with_store_and_bounds(store, DEFAULT_BUDGET, bound);
+// Every other constructor takes AnswerBound::DEFAULT.
+```
+
+A request's `max_rows=` and `max_bytes=` apply when they are **smaller**, exactly like
+`budget=`: a host's anonymous door stamps small ones, and a caller asking for more gets the
+space's bound.
+
+### Not covered
+
+What oxigraph materializes before the first row reaches the serializer: an `ORDER BY`, a
+`GROUP BY` or a `DISTINCT` consumes its whole input first, and that is bounded only by the
+time budget.
+
+## Bounds come inline, or not at all
+
+Through 0.1.12 a `budget=` given **by reference** (or as bytes that are not UTF-8) was
+silently ignored, and the space's ceiling applied. That was a bypass: a host door that stamps a
+small budget only when the caller sent none saw one present and stamped nothing. Now
+`budget=`, `max_rows=` and `max_bytes=` given any way but inline text are refused with
+`InvalidArgument` naming the argument (`budget::inline_bound`).
 
 ## Conformance
 
