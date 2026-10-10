@@ -43,6 +43,10 @@
 //! parses caller text refuses one over [`limits::MAX_SPARQL_BYTES`] or nested deeper than
 //! [`limits::MAX_SPARQL_NESTING`], and parses, evaluates and serializes the rest on a thread
 //! whose stack is sized from the text ([`limits::on_sparql_stack`]). See [`limits`].
+//! **So is every `graph=` source** (ledger #1043): the RDF parsers recurse too, on nested
+//! RDF 1.2 triple terms and on nested JSON-LD node objects, so each source is scanned with
+//! ikigai-rdf's depth scan for the syntax it will be parsed as, refused on `graph` past the
+//! bound, and loaded on a sized thread.
 //!
 //! **And every evaluation runs under a TIME budget** (ledger #964). A watchdog cancels
 //! oxigraph's [`budget::CancellationToken`] when the budget expires, the serialization loop
@@ -431,7 +435,12 @@ impl Endpoint for SparqlEndpoint {
         // `store_with_vocabulary`). Each listed source is resolved through the kernel and
         // loaded as a named graph (named by its URI). `inv.source` records the source's
         // golden thread, so the cached result invalidates when any source changes.
+        //
+        // Each source is scanned for depth as soon as it arrives, so a refusal costs no further
+        // resolution, and all of them are loaded together on a sized thread: oxigraph's parsers
+        // recurse, and a stack overflow aborts the host (ledger #1043, see `check_source`).
         let store = store_with_vocabulary()?;
+        let mut sources = Vec::new();
         for uri in graph_list
             .split([',', ' ', '\n', '\t'])
             .map(str::trim)
@@ -442,12 +451,25 @@ impl Endpoint for SparqlEndpoint {
                 .unwrap_or_else(|| sniff(&source.bytes));
             let graph = NamedNodeRef::new(uri)
                 .map_err(|e| Error::Endpoint(format!("graph name `{uri}` is not an IRI: {e}")))?;
-            store
-                .load_from_slice(
-                    RdfParser::from_format(format).with_default_graph(graph),
-                    &source.bytes,
-                )
-                .map_err(|e| Error::Endpoint(format!("loading <{uri}>: {e}")))?;
+            check_source(uri, format, &source.bytes)?;
+            sources.push((graph, format, source));
+        }
+        if !sources.is_empty() {
+            // The thread's floor, `STACK_BASE`, is the stack the load needs: no query text is
+            // parsed here, so none is passed to size it by (see the assertion after `check_source`).
+            limits::on_sparql_stack("", || {
+                for (graph, format, source) in &sources {
+                    store
+                        .load_from_slice(
+                            RdfParser::from_format(*format).with_default_graph(*graph),
+                            &source.bytes,
+                        )
+                        .map_err(|e| {
+                            Error::Endpoint(format!("loading <{}>: {e}", graph.as_str()))
+                        })?;
+                }
+                Ok(())
+            })?;
         }
 
         let (media, bytes) = query_within_budget(query_str, &store, as_type, budget, answer)?;
@@ -697,6 +719,42 @@ impl Endpoint for SparqlUpdateEndpoint {
             .output("text/plain;charset=utf-8")
     }
 }
+
+/// Refuse a `graph=` source that nests deeper than the parser it is about to meet can be
+/// trusted with, before it is loaded (ledger #1043): the scan for `format`, the format the
+/// source WILL be parsed as, from ikigai-rdf, whose doors read the same syntaxes with the same
+/// strict parsers (`RdfParser::from_format`, no `.lenient()`). RDF/XML is scanned for nested
+/// `rdf:parseType` elements and JSON-LD for nested objects and arrays; everything else oxigraph
+/// reads here (Turtle, TriG, N-Triples, N-Quads, N3) is Turtle's lexical family and gets the
+/// `<<` scan, exactly as ikigai-rdf's `urn:rdf:transrept` dispatches them.
+///
+/// Refused as a typed `InvalidArgument` on `graph`, naming the source, since one `graph=` may
+/// list several. Each scan is one pass with no recursion.
+///
+/// The bound alone does not make a debug build safe on a small thread: a JSON-LD document at
+/// [`ikigai_rdf::MAX_JSON_NESTING`] needs ~4.5 MiB of stack there. So the load itself runs on a
+/// thread of [`limits::STACK_BASE`], which is asserted at compile time to be at least
+/// [`ikigai_rdf::JSON_LD_STACK`].
+fn check_source(uri: &str, format: RdfFormat, bytes: &[u8]) -> Result<()> {
+    let scanned = match format {
+        RdfFormat::RdfXml => ikigai_rdf::check_rdfxml_nesting(bytes, "graph"),
+        RdfFormat::JsonLd { .. } => ikigai_rdf::check_json_nesting(bytes, "graph"),
+        _ => ikigai_rdf::check_turtle_nesting(&String::from_utf8_lossy(bytes), "graph"),
+    };
+    scanned.map_err(|e| match e {
+        Error::InvalidArgument { name, detail } => Error::InvalidArgument {
+            name,
+            detail: format!("the source <{uri}>: {detail}"),
+        },
+        other => other,
+    })
+}
+
+// The `graph=` load runs on `limits::on_sparql_stack`'s floor, `limits::STACK_BASE`, and that
+// floor must hold what ikigai-rdf gives its own JSON-LD parse, `ikigai_rdf::JSON_LD_STACK`: the
+// stack a debug build needs to expand JSON-LD at the bound, with room to spare. Checked when
+// this crate compiles, so lowering one below the other fails the build rather than a host.
+const _: () = assert!(limits::STACK_BASE >= ikigai_rdf::JSON_LD_STACK);
 
 /// Resolve a graph source through the kernel. An `http(s)://` URL is fetched via the
 /// HTTP module (`urn:httpGet`) — a bare URL isn't itself a bound resource — while a

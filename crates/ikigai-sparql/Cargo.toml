@@ -13,6 +13,11 @@ categories = ["web-programming", "database"]
 [dependencies]
 ikigai-core = { workspace = true }
 ikigai-vocab = { workspace = true }
+# The depth scans for `graph=` sources (ledger #1043): one copy of each, beside the doors that
+# already use them, rather than a third copy beside ikigai-shacl's. It costs the graph nothing
+# but ikigai-rdf itself: every crate it pulls in (oxrdfio, oxrdf, quick-xml at oxrdfxml's line)
+# is already here through oxigraph, natively and on wasm32 (`cargo tree`, 2026-10-10).
+ikigai-rdf = { workspace = true }
 oxigraph = { workspace = true }
 # The parser oxigraph itself uses, named directly so a query's ALGEBRA can be measured
 # against the time budget's bounds before oxigraph plans it (ledger #964): planning cannot be
