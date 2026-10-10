@@ -10,3 +10,7 @@ jobs:
     uses: ikigai-rs/.github/.github/workflows/rust.yml@main
     with:
       wasm-lib: true
+      # `http-client-probe` compiles oxigraph's HTTP client in, as a host's build does when rudof
+      # unifies `oxigraph/http-client` on (ledger #1083), and tests/sparql_service_egress.rs then
+      # proves SERVICE and LOAD still reach no network. Not `*`: the point is ONE named build.
+      features: http-client-probe
