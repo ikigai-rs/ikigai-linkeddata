@@ -12,7 +12,7 @@
 
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Request, Verb};
-use ikigai_sparql::budget::{MAX_ALGEBRA_NODES, MAX_JOIN_OPERANDS};
+use ikigai_sparql::budget::{AnswerBound, MAX_ALGEBRA_NODES, MAX_JOIN_OPERANDS};
 use ikigai_sparql::Store;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -58,14 +58,23 @@ fn long_bgp(n: usize) -> String {
 }
 
 /// The per-query space, or a shared store holding the vocabulary (the same 470 triples), each
-/// with a 60 s ceiling so the `budget=` a probe sends is what applies.
+/// with the given time ceiling, so the `budget=` a probe sends is what applies.
+///
+/// And with the answer-size bound at its CEILING (ledger #970): at the default bound the
+/// products here are refused for their SIZE in a few hundred milliseconds, before the deadline
+/// these tests are about (a debug build crossed 16 MiB at about 300 ms). A 400 ms product stays
+/// far under 1 GiB, so the time budget is still what stops it.
 fn kernel(shared: bool, ceiling: Duration) -> (Kernel, Arc<Store>) {
     let store = Arc::new(Store::new().unwrap());
     ikigai_sparql::load_vocabulary(&store).unwrap();
     let space = if shared {
-        ikigai_sparql::space_with_store_and_budget(Arc::clone(&store), ceiling)
+        ikigai_sparql::space_with_store_and_bounds(
+            Arc::clone(&store),
+            ceiling,
+            AnswerBound::CEILING,
+        )
     } else {
-        ikigai_sparql::space_with_budget(ceiling)
+        ikigai_sparql::space_with_bounds(ceiling, AnswerBound::CEILING)
     };
     (Kernel::new(Arc::new(space)), store)
 }
