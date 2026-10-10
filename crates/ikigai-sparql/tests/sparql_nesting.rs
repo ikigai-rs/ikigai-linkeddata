@@ -16,14 +16,17 @@
 //! `urn:sparql:update`. All nine go through two parse sites in `src/lib.rs`: `evaluate` and
 //! the update endpoint's `parse_update`.
 //!
-//! These tests use only the API that predates the fix, so they compile, and fail with the
-//! child aborted, against 0.1.10 (`257f89c`).
+//! The nesting tests use only the API that predates that fix, and failed with the child
+//! aborted against 0.1.10 (`257f89c`). The debug-and-release tests at the end (ledger #1025)
+//! also need `space_with_budget` (0.1.12) for the `t-` door, and fail with the child aborted
+//! against 0.2.0.
 
 use futures::executor::block_on;
 use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
 use ikigai_sparql::Store;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 const PROBE: &str = "IKIGAI_SPARQL_NESTING_PROBE";
 /// The bound, restated so these tests compile against 0.1.10, which has no constant to name.
@@ -117,6 +120,12 @@ fn update(shape: &str, n: usize) -> String {
     }
 }
 
+/// The time-budget ceiling of the `t-` doors: the per-query space with room for a probe whose
+/// subject is the STACK, so a slow runner reads as slow and never as a refusal. A debug build
+/// evaluates a byte-bound `IN` list in ~3 s on a laptop, and a CI runner sharing its cores
+/// with the other tests took longer than the 5 s default and was refused by time.
+const STACK_PROBE_BUDGET: Duration = Duration::from_secs(120);
+
 /// The per-query space, or a shared store seeded with one quad so a query has a row to see.
 fn kernel(shared: bool) -> Kernel {
     if !shared {
@@ -161,11 +170,14 @@ fn text_for(door: &str, shape: &str, n: usize) -> String {
 }
 
 fn issue(door: &str, shape: &str, n: usize) -> ikigai_core::Result<String> {
-    issue_text(
-        &kernel(door.starts_with("s-")),
-        door,
-        text_for(door, shape, n),
-    )
+    let kernel = if door.starts_with("t-") {
+        Kernel::new(Arc::new(ikigai_sparql::space_with_budget(
+            STACK_PROBE_BUDGET,
+        )))
+    } else {
+        kernel(door.starts_with("s-"))
+    };
+    issue_text(&kernel, door, text_for(door, shape, n))
 }
 
 /// The child's half: inert unless a parent named a probe. Runs it on a 2 MiB thread, a tokio
@@ -468,12 +480,13 @@ fn an_arithmetic_chain_at_the_algebra_bound_runs_in_every_build() {
 /// at the byte bound itself: the parse of a `1*1*…` chain (refused by the algebra bound only
 /// after it), and an `IN` list (one node however long, evaluated one level a member). In a
 /// debug build this reserves a ~2 GiB thread and touches about half of it, so it is also the
-/// check that a thread that size can be started on the platform CI runs.
+/// check that a thread that size can be started on the platform CI runs. Through the `t-`
+/// door, because what this pins is the stack, and the default time budget is not.
 #[test]
 fn the_costliest_shapes_per_byte_at_the_byte_bound_abort_nothing() {
     let room = (1 << 20) - 64;
-    let outcome = probe("q-select", "mul", room / 2);
+    let outcome = probe("t-select", "mul", room / 2);
     assert!(outcome.contains("MAX_ALGEBRA_NODES"), "{outcome}");
-    let outcome = probe("q-select", "in-list", room / 2);
+    let outcome = probe("t-select", "in-list", room / 2);
     assert!(outcome.starts_with("ok"), "{outcome}");
 }
