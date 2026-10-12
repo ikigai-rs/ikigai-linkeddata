@@ -75,6 +75,14 @@ arrays deeper than `MAX_JSON_NESTING` (64; the W3C JSON-LD test suite's deepest 
 build answers what a release one does. On wasm the parse runs inline and the bound alone
 applies. The scan is exported as `check_json_nesting`.
 
+Nothing else these syntaxes nest recurses, so nothing else is bounded: blank-node property
+lists, collections and RDF 1.2 annotation blocks in Turtle, and striped element nesting and XML
+literals in RDF/XML, are each answered at every door 32,000 levels deep (8,000 for RDF/XML)
+on a 2 MiB thread in a debug build (`tests/structural_depth.rs`, ledger #1326). ⚠ That
+is about the stack, not time: oxrdfxml walks its whole stack of open elements once per element,
+so striped RDF/XML costs the square of its depth (8,000 levels, 330 KB, in 1.8 s of a debug
+build).
+
 ## Caching
 
 Transreption is a pure function of its input bytes, so its output is *as cacheable as its

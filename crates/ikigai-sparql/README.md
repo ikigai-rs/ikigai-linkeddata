@@ -285,6 +285,23 @@ sources that pass are loaded on a thread of 16 MiB, enough for JSON-LD at the bo
 build (~4.5 MiB). `tests/sparql_graph_depth.rs` reproduces both aborts in a child process on a
 2 MiB thread.
 
+### Bounds on the shared store's triple terms
+
+A read door bounds the triple terms a caller SENDS; nothing bounded the ones an update BUILDS.
+`DELETE { <a> <p> ?t } INSERT { <a> <p> ?n } WHERE { <a> <p> ?t BIND(TRIPLE(<s>, <p>, ?t) AS ?n) }`
+wraps the term the store holds in one more level, every request inside every bound, and oxigraph
+encodes, decodes and serializes a triple term recursively. Through 0.2.1, a caller holding
+`urn:cap:sparql:update` grew one 56 levels a request until the update itself aborted the host at
+8,400 levels, and any query reading the term at 16,800 (ledger #1326). Now the store keeps an
+invariant: no stored triple term nests deeper than 64 (`MAX_TURTLE_NESTING`, what the read doors
+admit). An update whose text could build a triple term (`<<`, `{|`, `~`, `TRIPLE`, or a `\u`
+escape) runs in a transaction that commits only if the store it leaves holds no deeper term; one
+that would is refused as an `InvalidArgument` on `update` or `content`, and applies nothing. ⚠
+That check scans the whole store, so such an update costs a scan besides its own work; others
+are not checked. It guards writes through `urn:sparql:update` only: a host writing the same
+store another way keeps the invariant itself. `tests/sparql_structural_depth.rs` reproduces the
+abort in a child process on a 2 MiB thread.
+
 ## Time budget
 
 Through 0.1.11 nothing bounded how long a query ran, and oxigraph is slow well before it is
