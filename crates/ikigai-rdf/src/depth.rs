@@ -47,6 +47,15 @@
 //!    the bound too (it needs ~4.5 MiB at 64), and a debug and a release host admit and answer
 //!    the same documents. ⚠ On wasm there is no thread: the parse runs inline, and the bound
 //!    alone applies (~130 KiB at 64 in an optimized build).
+//!
+//! # What does not recurse, and so is not bounded (ledger #1326)
+//!
+//! Swept at every door on a 2 MiB thread in a debug build (`tests/structural_depth.rs`):
+//! Turtle blank-node property lists, collections and RDF 1.2 annotation blocks (32,000 levels;
+//! oxttl parses with an explicit stack and they build only blank nodes), and RDF/XML striped
+//! element nesting and XML literals (8,000; oxrdfxml keeps its open elements on a `Vec`). ⚠ Striped RDF/XML is QUADRATIC in time, though: oxrdfxml walks the whole element
+//! stack for an inherited `xml:lang`, base direction, `rdf:version` and base IRI on each
+//! element, so 8,000 levels take 1.8 s in a debug build.
 
 use ikigai_core::{Error, Result};
 use quick_xml::events::Event;

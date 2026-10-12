@@ -46,7 +46,10 @@
 //! **So is every `graph=` source** (ledger #1043): the RDF parsers recurse too, on nested
 //! RDF 1.2 triple terms and on nested JSON-LD node objects, so each source is scanned with
 //! ikigai-rdf's depth scan for the syntax it will be parsed as, refused on `graph` past the
-//! bound, and loaded on a sized thread.
+//! bound, and loaded on a sized thread. **And so is every triple term an update leaves in the
+//! shared store** (ledger #1326): an update that could build one commits only if no stored term
+//! nests deeper than ikigai-rdf's `MAX_TURTLE_NESTING`, since a term grown an update at a time
+//! has no other limit and a deep one aborts whatever reads it.
 //!
 //! **And every evaluation runs under a TIME budget** (ledger #964). A watchdog cancels
 //! oxigraph's [`budget::CancellationToken`] when the budget expires, the serialization loop
@@ -70,6 +73,7 @@
 pub mod budget;
 mod egress;
 pub mod limits;
+mod stored;
 
 use async_trait::async_trait;
 use ikigai_core::{
@@ -643,12 +647,34 @@ impl Endpoint for SparqlUpdateEndpoint {
                     .map_err(|e| Error::Endpoint(format!("SPARQL UPDATE syntax error: {e}")))?;
                 budget::check_update(&update, arg)?;
                 egress::check_update(&update, arg)?;
-                egress::evaluator()
+                let prepared = egress::evaluator()
                     .with_cancellation_token(token.clone())
-                    .for_update(update)
-                    .on_store(&self.store)
+                    .for_update(update);
+                let evaluated = |e: oxigraph::sparql::UpdateEvaluationError| {
+                    Error::Endpoint(format!("update evaluation error: {e}"))
+                };
+                if !stored::may_construct_triple_term(update_str) {
+                    return prepared.on_store(&self.store).execute().map_err(evaluated);
+                }
+                // An update that can build a triple term commits only once the store, as it
+                // left it, holds none deeper than the bound (ledger #1326, see `stored`).
+                // Dropping the transaction uncommitted applies nothing.
+                let mut transaction = self
+                    .store
+                    .start_transaction()
+                    .map_err(|e| Error::Endpoint(format!("update transaction: {e}")))?;
+                prepared
+                    .on_transaction(&mut transaction)
                     .execute()
-                    .map_err(|e| Error::Endpoint(format!("update evaluation error: {e}")))
+                    .map_err(evaluated)?;
+                stored::check_transaction(
+                    &transaction,
+                    egress::evaluator().with_cancellation_token(token.clone()),
+                    arg,
+                )?;
+                transaction
+                    .commit()
+                    .map_err(|e| Error::Endpoint(format!("update commit: {e}")))
             })
         })?;
         match applied {
