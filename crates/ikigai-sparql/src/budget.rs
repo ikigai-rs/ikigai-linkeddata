@@ -109,7 +109,9 @@ pub const DEFAULT_BUDGET: Duration = Duration::from_secs(5);
 ///
 /// A join's operands are its triple patterns (a sequence path `:a/:b/:c` is parsed into one
 /// triple pattern per step) and every nested group, sub-`SELECT` and path pattern joined beside
-/// them; an `OPTIONAL`, `UNION` or `MINUS` side is a join of its own. oxigraph's greedy join
+/// them; a `GRAPH <g> { … }` or `GRAPH ?g { … }` block is not one operand, because the planner
+/// erases it, so its patterns count toward the enclosing join (ledger #1426); an `OPTIONAL`,
+/// `UNION` or `MINUS` side is a join of its own. oxigraph's greedy join
 /// reordering is about cubic in this number: measured, 32 patterns plan in ~4 ms, 64 in
 /// ~70 ms, 100 in ~350 ms, 200 in 7 s, and 1,000 path steps in 19 s. The largest join the
 /// ecosystem runs has 11 patterns (survey, 2026-10-09). 32 rather than 64 because joins
@@ -599,14 +601,22 @@ impl Cost {
         Ok(())
     }
 
+    // The walk is kept identical to ikigai-store's `budget.rs`, which copies it (ledger #970):
+    // change both or neither. The counting rule for GRAPH blocks and nested joins (ledger #1426)
+    // is the same in both.
     fn pattern(&mut self, pattern: &GraphPattern) {
         match pattern {
             GraphPattern::Bgp { patterns } => {
                 self.nodes += patterns.len();
                 self.widest_join = self.widest_join.max(patterns.len());
             }
-            GraphPattern::Join { .. } => {
+            GraphPattern::Join { .. } | GraphPattern::Graph { .. } => {
                 // The planner flattens nested joins and reorders all their operands at once.
+                // And it ERASES `GRAPH <g> { … }` / `GRAPH ?g { … }` before that (sparopt's
+                // `from_sparql_algebra` pushes the graph name into each quad pattern), so a
+                // GRAPH block is not one operand: its patterns join the ENCLOSING join. Counting
+                // it as one let six blocks of 31 plan as one join of 186 (ledger #1426).
+                // `UNION`, `OPTIONAL` and `MINUS` sides stay joins of their own.
                 let mut operands = 0;
                 let mut todo = vec![pattern];
                 while let Some(next) = todo.pop() {
@@ -615,6 +625,10 @@ impl Cost {
                             self.nodes += 1;
                             todo.push(left);
                             todo.push(right);
+                        }
+                        GraphPattern::Graph { inner, .. } => {
+                            self.nodes += 1;
+                            todo.push(inner);
                         }
                         GraphPattern::Bgp { patterns } => {
                             self.nodes += patterns.len();
@@ -688,8 +702,7 @@ impl Cost {
                 self.nodes += 1;
                 self.pattern(inner);
             }
-            GraphPattern::Graph { inner, .. }
-            | GraphPattern::Project { inner, .. }
+            GraphPattern::Project { inner, .. }
             | GraphPattern::Distinct { inner }
             | GraphPattern::Reduced { inner }
             | GraphPattern::Slice { inner, .. } => {
@@ -819,6 +832,118 @@ mod tests {
             patterns(30)
         );
         assert_eq!(cost(&split).0, 30);
+    }
+
+    /// `blocks` `GRAPH` blocks of `per_block` patterns each, side by side in one group, and
+    /// `name` the graph each names (`<urn:g>` or `?g`). The auditor's shape (ledger #1426).
+    fn graph_blocks(blocks: usize, per_block: usize, name: &str) -> String {
+        let body: String = (0..blocks)
+            .map(|b| {
+                let inner: String = (0..per_block)
+                    .map(|i| format!("?s <urn:p> ?o{b}_{i} . "))
+                    .collect();
+                format!("GRAPH {name} {{ {inner} }} ")
+            })
+            .collect();
+        format!("SELECT * WHERE {{ {body} }}")
+    }
+
+    #[test]
+    fn a_graph_block_is_not_one_operand_its_patterns_join_the_enclosing_join() {
+        // sparopt erases the GRAPH wrapper into quad patterns and then flattens the joins,
+        // so six blocks of 31 plan as ONE join of 186 (measured: 3.8 s in a release build,
+        // twelve blocks 64 s). They are counted that way, and refused.
+        for name in ["<urn:g>", "?g"] {
+            assert_eq!(cost(&graph_blocks(6, 31, name)).0, 6 * 31, "{name}");
+            let err = query(&graph_blocks(6, 31, name)).unwrap_err();
+            assert!(
+                matches!(&err, Error::InvalidArgument { name, detail } if name == "query"
+                    && detail.contains("MAX_JOIN_OPERANDS")
+                    && detail.contains("186")),
+                "{name}: {err}"
+            );
+        }
+        // Two blocks of 16 are 32: at the bound, admitted. One more pattern is refused.
+        query(&graph_blocks(2, 16, "<urn:g>")).unwrap();
+        let err = query(&format!(
+            "SELECT * WHERE {{ GRAPH <urn:g> {{ {} }} GRAPH <urn:h> {{ {} }} ?x ?y ?z }}",
+            patterns(16),
+            patterns(16)
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("33"), "{err}");
+        // A GRAPH nested in a GRAPH, or in a nested group, still joins the enclosing join.
+        let nested = format!(
+            "SELECT * WHERE {{ {} GRAPH <urn:g> {{ {} GRAPH ?h {{ {} }} }} {{ GRAPH ?k {{ {} }} }} }}",
+            patterns(3),
+            patterns(4),
+            patterns(5),
+            patterns(6)
+        );
+        assert_eq!(cost(&nested).0, 3 + 4 + 5 + 6);
+        // A GRAPH around a whole group is the same join as the group without it.
+        assert_eq!(
+            cost(&format!(
+                "SELECT * WHERE {{ GRAPH <urn:g> {{ {} {{ {} }} }} }}",
+                patterns(10),
+                patterns(10)
+            ))
+            .0,
+            20
+        );
+    }
+
+    #[test]
+    fn graph_blocks_split_across_union_optional_or_minus_are_bounded_one_side_at_a_time() {
+        // The same 186 patterns, one block a UNION branch: six joins of 31, each within the
+        // bound, so admitted.
+        let branches: Vec<String> = (0..6)
+            .map(|b| {
+                let inner: String = (0..31)
+                    .map(|i| format!("?s <urn:p> ?o{b}_{i} . "))
+                    .collect();
+                format!("{{ GRAPH <urn:g> {{ {inner} }} }}")
+            })
+            .collect();
+        let union = format!("SELECT * WHERE {{ {} }}", branches.join(" UNION "));
+        assert_eq!(cost(&union).0, 31);
+        query(&union).unwrap();
+        // OPTIONAL and MINUS sides are joins of their own too.
+        let optional = format!(
+            "SELECT * WHERE {{ GRAPH <urn:g> {{ {} }} OPTIONAL {{ GRAPH ?g {{ {} }} }} }}",
+            patterns(30),
+            patterns(30)
+        );
+        assert_eq!(cost(&optional).0, 30);
+        query(&optional).unwrap();
+        let minus = format!(
+            "SELECT * WHERE {{ GRAPH <urn:g> {{ {} }} MINUS {{ GRAPH ?g {{ {} }} }} }}",
+            patterns(30),
+            patterns(30)
+        );
+        assert_eq!(cost(&minus).0, 30);
+        query(&minus).unwrap();
+        // But a branch over the bound is refused on its own.
+        let wide = format!(
+            "SELECT * WHERE {{ {{ ?a ?b ?c }} UNION {{ {} }} }}",
+            graph_blocks(2, 17, "<urn:g>")
+                .trim_start_matches("SELECT * WHERE {")
+                .trim_end_matches('}')
+        );
+        assert_eq!(cost(&wide).0, 34);
+        assert!(query(&wide).is_err());
+    }
+
+    #[test]
+    fn an_update_counts_graph_blocks_in_its_where_clause_the_same_way() {
+        let text = graph_blocks(6, 31, "<urn:g>").replacen(
+            "SELECT * WHERE",
+            "DELETE { ?s <urn:p> ?o0_0 } WHERE",
+            1,
+        );
+        let update = SparqlParser::new().parse_update(&text).unwrap();
+        let err = check_update(&update, "content").unwrap_err();
+        assert!(err.to_string().contains("MAX_JOIN_OPERANDS"), "{err}");
     }
 
     #[test]
