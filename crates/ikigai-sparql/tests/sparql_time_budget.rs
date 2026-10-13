@@ -72,6 +72,23 @@ fn graph_blocks(blocks: usize, name: &str) -> String {
     format!("SELECT * WHERE {{ {body} }}")
 }
 
+/// `blocks` groups of 31 patterns side by side, each closed by `wrap` (`{b}` is the block's
+/// number). sparopt's normalization ERASES these wrappers before it reorders joins (ledger
+/// #1429): `FILTER(true)` is dropped, `OPTIONAL {}` returns its left side and
+/// `BIND(?unbound AS ?x)` its inner, so six blocks plan as ONE join of 186, like six GRAPH
+/// blocks (~4.1 s each in a release build on 0.2.3, where all three passed the bound).
+fn wrapped_blocks(blocks: usize, wrap: &str) -> String {
+    let body: String = (0..blocks)
+        .map(|b| {
+            let inner: String = (0..31)
+                .map(|i| format!("?s <urn:p> ?o{b}_{i} . "))
+                .collect();
+            format!("{{ {inner} {} }} ", wrap.replace("{b}", &b.to_string()))
+        })
+        .collect();
+    format!("SELECT * WHERE {{ {body} }}")
+}
+
 /// The per-query space, or a shared store holding the vocabulary (the same 470 triples), each
 /// with the given time ceiling, so the `budget=` a probe sends is what applies.
 ///
@@ -167,6 +184,9 @@ fn probe_child() {
         "bgp" => long_bgp(2_000),
         "graph-blocks" => graph_blocks(6, "<urn:g>"),
         "graph-var-blocks" => graph_blocks(6, "?g"),
+        "filter-true-blocks" => wrapped_blocks(6, "FILTER(true)"),
+        "optional-empty-blocks" => wrapped_blocks(6, "OPTIONAL {}"),
+        "bind-unbound-blocks" => wrapped_blocks(6, "BIND(?unbound{b} AS ?x{b})"),
         other => panic!("no probe named {other}"),
     };
     let (kernel, _) = kernel(door == "shared", Duration::from_secs(600));
@@ -307,6 +327,32 @@ fn the_measured_planner_shapes_are_refused_before_planning() {
         assert!(
             p.outcome.starts_with("err invalid argument `query`")
                 && p.outcome.contains(&MAX_JOIN_OPERANDS.to_string()),
+            "{which}: {}",
+            p.outcome
+        );
+        assert!(
+            p.took < Duration::from_secs(2),
+            "{which}: took {:?}",
+            p.took
+        );
+        assert!(p.next_ok, "{which}: the next query was not answered");
+    }
+}
+
+#[test]
+fn wrappers_the_planner_erases_do_not_hide_join_operands() {
+    // Ledger #1429: on 0.2.3 each of these passed the bound as six joins of 31 and planned as
+    // one join of 186, seconds of planning no token reaches. Now each is refused at once.
+    for which in [
+        "filter-true-blocks",
+        "optional-empty-blocks",
+        "bind-unbound-blocks",
+    ] {
+        let p = probe("query", "select", which);
+        assert!(
+            p.outcome.starts_with("err invalid argument `query`")
+                && p.outcome.contains("MAX_JOIN_OPERANDS")
+                && p.outcome.contains("186"),
             "{which}: {}",
             p.outcome
         );
