@@ -57,6 +57,21 @@ fn long_bgp(n: usize) -> String {
     )
 }
 
+/// `blocks` `GRAPH` blocks of 31 patterns side by side (ledger #1426): each block is within
+/// [`MAX_JOIN_OPERANDS`], but the planner erases the `GRAPH` wrapper and flattens the joins, so
+/// six of them plan as ONE join of 186 (3.8 s in a release build; twelve, 64 s).
+fn graph_blocks(blocks: usize, name: &str) -> String {
+    let body: String = (0..blocks)
+        .map(|b| {
+            let inner: String = (0..31)
+                .map(|i| format!("?s <urn:p> ?o{b}_{i} . "))
+                .collect();
+            format!("GRAPH {name} {{ {inner} }} ")
+        })
+        .collect();
+    format!("SELECT * WHERE {{ {body} }}")
+}
+
 /// The per-query space, or a shared store holding the vocabulary (the same 470 triples), each
 /// with the given time ceiling, so the `budget=` a probe sends is what applies.
 ///
@@ -150,6 +165,8 @@ fn probe_child() {
         "product" => PRODUCT.to_string(),
         "path" => long_path(5_000),
         "bgp" => long_bgp(2_000),
+        "graph-blocks" => graph_blocks(6, "<urn:g>"),
+        "graph-var-blocks" => graph_blocks(6, "?g"),
         other => panic!("no probe named {other}"),
     };
     let (kernel, _) = kernel(door == "shared", Duration::from_secs(600));
@@ -278,7 +295,14 @@ fn a_query_slow_in_the_evaluator_is_stopped_at_its_budget_at_every_query_door() 
 fn the_measured_planner_shapes_are_refused_before_planning() {
     // On 0.1.11 these planned for 10+ minutes and 1+ minute, where no token reaches. Now they
     // are refused by the algebra bound, at once, and plan nothing.
-    for (which, door) in [("path", "query"), ("bgp", "shared")] {
+    // And six GRAPH blocks of 31 (ledger #1426), which passed the bound one block at a time and
+    // planned as one join of 186, past the token, for seconds after the caller was answered.
+    for (which, door) in [
+        ("path", "query"),
+        ("bgp", "shared"),
+        ("graph-blocks", "shared"),
+        ("graph-var-blocks", "query"),
+    ] {
         let p = probe(door, "select", which);
         assert!(
             p.outcome.starts_with("err invalid argument `query`")
