@@ -316,7 +316,7 @@ Every evaluation at all nine doors now runs under a **time budget**, in two laye
 | bound | value | what it stops |
 | --- | --- | --- |
 | the budget | 5 s by default (`budget::DEFAULT_BUDGET`), set by the host | evaluation and serialization, stopped at the deadline and refused as a `timeout` |
-| `budget::MAX_JOIN_OPERANDS` | 32 | a join with more triple patterns, path steps and nested groups, refused after parsing, before planning |
+| `budget::MAX_JOIN_OPERANDS` | 32 | a join with more triple patterns, path steps and nested groups, refused after parsing, before planning. A `GRAPH` block is not one operand: the planner erases it, so its patterns count toward the enclosing join (ledger #1426); `OPTIONAL`, `UNION` and `MINUS` sides are joins of their own |
 | `budget::MAX_ALGEBRA_NODES` | 1024 | a query or update with more operators (patterns, `OPTIONAL`/`UNION`/`FILTER`/`BIND`, path and expression operators) |
 
 - **The deadline** is oxigraph's `CancellationToken`, cancelled by a watchdog thread when the
