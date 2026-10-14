@@ -406,9 +406,10 @@ struct SparqlEndpoint {
 #[async_trait]
 impl Endpoint for SparqlEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let query_str = inv.inline_str("query").map_err(|_| {
-            Error::Endpoint("urn:sparql:* needs a `query=<sparql>` argument".to_string())
-        })?;
+        // Core's typed refusal, unchanged: `MissingArgument` when `query` is absent,
+        // `InvalidArgument` when it is not inline or not UTF-8, so a caller can tell its own
+        // omission from a failure of the endpoint.
+        let query_str = inv.inline_str("query")?;
         // Before anything else, `graph=` sources included: a text the parser cannot be
         // trusted with is refused without costing a single resolution (ledger #962).
         limits::check_sparql(query_str, "query")?;
@@ -2562,6 +2563,44 @@ mod tests {
 
             // …and nothing was gained or lost on the way.
             assert_eq!(store.len().unwrap(), total, "quad count preserved");
+        }
+    }
+
+    /// A query form called without `query` is refused as core's typed `MissingArgument`
+    /// naming it, never an untyped endpoint error: the caller's omission, not this module's
+    /// failure (ikigai-conformance 0.8.0's REQUIRED check). Text that is not UTF-8 is an
+    /// `InvalidArgument` naming `query`. Both spaces, all four forms.
+    #[test]
+    fn a_missing_or_unusable_query_is_a_typed_refusal() {
+        use futures::executor::block_on;
+        use ikigai_core::{Capability, Kernel};
+
+        for (which, space) in [
+            ("space", space()),
+            (
+                "space_with_store",
+                space_with_store(Arc::new(Store::new().unwrap())),
+            ),
+        ] {
+            let kernel = Kernel::new(Arc::new(space));
+            for form in ["select", "ask", "describe", "construct"] {
+                let iri = format!("urn:sparql:{form}");
+                let request = Request::new(Verb::Source, Iri::parse(&iri).unwrap());
+                match block_on(kernel.issue(request, &Capability::root())) {
+                    Err(Error::MissingArgument(name)) => assert_eq!(name, "query", "{which} {iri}"),
+                    other => panic!(
+                        "{which} {iri} without `query`: expected MissingArgument, got {other:?}"
+                    ),
+                }
+                let request = Request::new(Verb::Source, Iri::parse(&iri).unwrap())
+                    .with_arg("query", ArgRef::Inline(vec![0xff, 0xfe]));
+                match block_on(kernel.issue(request, &Capability::root())) {
+                    Err(Error::InvalidArgument { name, .. }) => {
+                        assert_eq!(name, "query", "{which} {iri}")
+                    }
+                    other => panic!("{which} {iri} with non-UTF-8 `query`: expected InvalidArgument, got {other:?}"),
+                }
+            }
         }
     }
 }
