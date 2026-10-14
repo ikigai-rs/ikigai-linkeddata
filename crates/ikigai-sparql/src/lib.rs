@@ -23,6 +23,10 @@
 //! CONSTRUCT/DESCRIBE serialize as RDF (`text/turtle` default / N-Triples / …), which
 //! composes with `urn:rdf:transrept` for an HTML view.
 //!
+//! A source served in a type the loader does not parse is **transrepted** to RDF first, through
+//! a transreptor chain the kernel selects from its type (ledger #1442; see `parseable`), so an
+//! ikigai-log segment or a gzipped graph is listed like any other.
+//!
 //! The result is `.cacheable()` and — because each graph is resolved with `inv.source` —
 //! depends on every source's golden thread, so it is cached and auto-invalidated when any
 //! source changes. Built on Oxigraph's in-memory store (no rocksdb); runs in the browser.
@@ -451,9 +455,7 @@ impl Endpoint for SparqlEndpoint {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            let source = resolve_graph(inv, uri).await?;
-            let format = rdf_format(source.repr_type.media_type.as_str())
-                .unwrap_or_else(|| sniff(&source.bytes));
+            let (format, source) = parseable(inv, uri, resolve_graph(inv, uri).await?).await?;
             let graph = NamedNodeRef::new(uri)
                 .map_err(|e| Error::Endpoint(format!("graph name `{uri}` is not an IRI: {e}")))?;
             check_source(uri, format, &source.bytes)?;
@@ -521,8 +523,9 @@ impl Endpoint for SparqlEndpoint {
                 ArgSpec::new("graph")
                     .summary(
                         "optional: one or more graph source IRIs, comma- or space-separated; \
-                         each resolved through the kernel and loaded as a named graph. Omit to \
-                         query the always-present ikigai vocabulary alone.",
+                         each resolved through the kernel, transrepted to RDF when its type is \
+                         not an RDF syntax and a transreptor converts it, and loaded as a named \
+                         graph. Omit to query the always-present ikigai vocabulary alone.",
                     )
                     // A LIST of IRIs, and an ArgSpec has no way to say "many": `xsd:anyURI`
                     // would tell a validator that `a, b` is malformed, which it is not.
@@ -800,6 +803,71 @@ async fn resolve_graph(inv: &Invocation<'_>, uri: &str) -> Result<Representation
             Iri::parse(uri).map_err(|e| Error::Endpoint(format!("bad graph IRI `{uri}`: {e}")))?;
         inv.source(&iri).await
     }
+}
+
+/// The RDF types a `graph=` source is transrepted TO when its own type is not one the loader
+/// parses, in order of preference: Turtle, the kernel's canonical hub and so the type a
+/// transreptor is likeliest to reach, then N-Quads, for a source whose natural form is a dataset.
+const TRANSREPTION_TARGETS: [&str; 2] = ["text/turtle", "application/n-quads"];
+
+/// A `graph=` source as something the loader can parse: the source itself when its type names
+/// an RDF syntax ([`rdf_format`]), else the source TRANSREPTED to RDF through the kernel when
+/// a transreptor chain reaches one of [`TRANSREPTION_TARGETS`] (ledger #1442), else the source
+/// with its syntax [`sniff`]ed, as every unparseable source was before.
+///
+/// ⚠ **The kernel does not transrept a `Source` answer because the request carries `as=`**:
+/// `as=` is an argument the TARGET may or may not honor, so asking for Turtle on the request
+/// would reach only sources that already serve it. Transreption is the caller's to select
+/// ([`Invocation::select_transreptor`], lossless steps only) and to drive, one step at a time
+/// through the kernel, which records each step as a dependency like the source itself. So the
+/// answer is exactly as cacheable as its least cacheable step, and an uncacheable transreptor
+/// is named by `urn:kernel:uncached` as the reason.
+///
+/// Only a source that needs it pays: a source already in an RDF syntax is returned untouched,
+/// and so is one whose type says nothing about its syntax (none, or `application/octet-stream`),
+/// which is sniffed rather than planned, since a plan from "any bytes" is a guess and the sniff
+/// is the loader's own guess at no request's cost. A type with no route to RDF is sniffed too:
+/// this adds a route and takes none away. The transrepted bytes then meet the same depth scan
+/// and the same sized load as any other source; a step's own time and size are the
+/// transreptor's to bound, as resolving the source is the source's (see [`budget`]).
+async fn parseable(
+    inv: &Invocation<'_>,
+    uri: &str,
+    source: Representation,
+) -> Result<(RdfFormat, Representation)> {
+    let media = media_base(source.repr_type.media_type.as_str()).to_string();
+    if let Some(format) = rdf_format(&media) {
+        return Ok((format, source));
+    }
+    if !(media.is_empty() || media == "application/octet-stream") {
+        for target in TRANSREPTION_TARGETS {
+            let Some(plan) = inv.select_transreptor(&media, target) else {
+                continue;
+            };
+            let mut current = source;
+            for step in plan {
+                let iri = Iri::parse(&step.endpoint).map_err(|e| {
+                    Error::Endpoint(format!("bad transreptor IRI `{}`: {e}", step.endpoint))
+                })?;
+                let request = Request::new(Verb::Source, iri)
+                    .with_arg("content", ArgRef::Inline(current.bytes))
+                    .with_arg("as", ArgRef::Inline(step.to.clone().into_bytes()));
+                current = inv.issue(request).await.map_err(|e| match e {
+                    Error::Endpoint(detail) => Error::Endpoint(format!(
+                        "transrepting the source <{uri}> from {media} to {} through <{}>: \
+                         {detail}",
+                        step.to, step.endpoint
+                    )),
+                    other => other,
+                })?;
+            }
+            let format = rdf_format(current.repr_type.media_type.as_str())
+                .unwrap_or_else(|| sniff(&current.bytes));
+            return Ok((format, current));
+        }
+    }
+    let format = sniff(&source.bytes);
+    Ok((format, source))
 }
 
 /// The `budget=` argument every endpoint declares: milliseconds, at most the space's ceiling.
