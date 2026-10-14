@@ -14,6 +14,16 @@ dataset instead: `FROM <uri>` makes one source the default graph, and `FROM NAME
 `GRAPH` can reach (alone, it leaves the default graph empty, as SPARQL 1.1 says). Built on [`oxigraph`](https://crates.io/crates/oxigraph)
 0.5's in-memory store (no rocksdb), so it runs natively and in the browser.
 
+A source need not be RDF to begin with. One served in an RDF syntax (Turtle, N-Triples,
+N-Quads, TriG, RDF/XML, JSON-LD) is loaded as it is; one served in any other type is
+**transrepted** to Turtle (or N-Quads) through whatever lossless transreptor chain the kernel
+can select from its type, so an ikigai-log segment (`text/x-ikigai-log`) or a gzipped graph is
+queryable as listed, with no compose door per source. Each step is a sub-request, so the
+answer is as cacheable as its least cacheable step, and `urn:kernel:uncached` names an
+uncacheable one. A source with no type (or `application/octet-stream`), or with no route to
+RDF, is sniffed. ⚠ The kernel does not do this because a request says `as=text/turtle`; the
+loader selects and drives the chain itself.
+
 ## Endpoints
 
 | Resource | Result shape |
