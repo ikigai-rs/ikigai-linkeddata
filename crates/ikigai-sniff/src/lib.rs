@@ -343,13 +343,9 @@ struct AutoTransrept;
 #[async_trait]
 impl Endpoint for AutoTransrept {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let bytes = inv.inline_arg("content").map_err(|_| {
-            Error::Endpoint(
-                "urn:transrept:auto needs bytes — pipe a resource into it (e.g. \
-                 `source urn:httpGet url=… | urn:transrept:auto as=text/html`) or pass `content=…`"
-                    .to_string(),
-            )
-        })?;
+        // Core's typed refusal, unchanged: `MissingArgument` when absent (pipe a resource in,
+        // or pass `content=…`), `InvalidArgument` when not inline.
+        let bytes = inv.inline_arg("content")?;
         let from = sniff(bytes);
         let to = inv.inline_str("as").unwrap_or(TURTLE);
 
@@ -425,13 +421,9 @@ impl Endpoint for AutoTransrept {
 
 /// Resolve a sniff request: read the bytes from `content` and return the detected media type.
 fn sniff_endpoint(inv: &Invocation<'_>) -> Result<Representation> {
-    let bytes = inv.inline_arg("content").map_err(|_| {
-        Error::Endpoint(
-            "urn:sniff needs bytes — pipe a resource into it (e.g. \
-             `source urn:httpGet url=… | urn:sniff`) or pass `content=…`"
-                .to_string(),
-        )
-    })?;
+    // Core's typed refusal, unchanged: `MissingArgument` when absent (pipe a resource in, or
+    // pass `content=…`), `InvalidArgument` when not inline.
+    let bytes = inv.inline_arg("content")?;
     let media = sniff(bytes);
     Ok(Representation::new(
         ReprType::new(PLAIN).with_param("charset", "utf-8"),
@@ -715,5 +707,20 @@ mod tests {
             msg.contains("no transreptor") && msg.contains("image/png"),
             "{msg}"
         );
+    }
+
+    /// A call without `content` is refused as core's typed `MissingArgument` naming it,
+    /// never an untyped endpoint error: the caller's omission, not this module's failure
+    /// (ikigai-conformance 0.8.0's REQUIRED check). Both endpoints.
+    #[test]
+    fn a_missing_content_is_a_typed_missing_argument() {
+        let kernel = auto_kernel();
+        for iri in ["urn:sniff", "urn:transrept:auto"] {
+            let request = Request::new(Verb::Source, Iri::parse(iri).unwrap());
+            match futures::executor::block_on(kernel.issue(request, &Capability::root())) {
+                Err(Error::MissingArgument(name)) => assert_eq!(name, "content", "{iri}"),
+                other => panic!("{iri} without `content`: expected MissingArgument, got {other:?}"),
+            }
+        }
     }
 }

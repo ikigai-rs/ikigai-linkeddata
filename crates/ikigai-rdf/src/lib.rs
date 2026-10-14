@@ -97,9 +97,9 @@ fn serialize_graph(graph: &Graph) -> Result<Vec<u8>> {
 /// document, else an IRI sourced through the kernel (the compact-context
 /// pattern: inline literal OR resolve the reference).
 async fn with_graph(inv: &Invocation<'_>, who: &str) -> Result<Graph> {
-    let with = inv.inline_str("with").map_err(|_| {
-        Error::Endpoint(format!("{who}: needs with= (a graph IRI or inline Turtle)"))
-    })?;
+    // Core's typed refusal, unchanged: `MissingArgument` when absent, `InvalidArgument` when
+    // not inline or not UTF-8, so a caller can tell its own omission from a failure here.
+    let with = inv.inline_str("with")?;
     if with.trim_start().starts_with('@') || with.trim_start().starts_with('<') {
         return parse_graph(with, who, "with");
     }
@@ -135,9 +135,8 @@ struct UnionEndpoint;
 #[async_trait::async_trait]
 impl Endpoint for UnionEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let content = inv
-            .inline_str("content")
-            .map_err(|_| Error::Endpoint("urn:rdf:union: pipe a Turtle graph in".to_string()))?;
+        // Typed refusals from core (`MissingArgument`/`InvalidArgument`), as in `with_graph`.
+        let content = inv.inline_str("content")?;
         let mut graph = parse_graph(content, "urn:rdf:union", "content")?;
         for triple in with_graph(inv, "urn:rdf:union").await?.iter() {
             graph.insert(triple);
@@ -188,9 +187,8 @@ struct DiffEndpoint;
 #[async_trait::async_trait]
 impl Endpoint for DiffEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let content = inv
-            .inline_str("content")
-            .map_err(|_| Error::Endpoint("urn:rdf:diff: pipe a Turtle graph in".to_string()))?;
+        // Typed refusals from core (`MissingArgument`/`InvalidArgument`), as in `with_graph`.
+        let content = inv.inline_str("content")?;
         let mode = inv.inline_str("mode").unwrap_or("added");
         let ours = parse_graph(content, "urn:rdf:diff", "content")?;
         let theirs = with_graph(inv, "urn:rdf:diff").await?;
@@ -335,13 +333,9 @@ pub fn space() -> EndpointSpace {
 /// Resolve a transreption request: read the RDF from `content` (piped or named), the
 /// target syntax from `as` (default Turtle), and return the re-serialized graph.
 fn transrept(inv: &Invocation<'_>) -> Result<Representation> {
-    let input = inv.inline_str("content").map_err(|_| {
-        Error::Endpoint(
-            "urn:rdf:transrept needs RDF input — pipe a resource into it (e.g. \
-             `source urn:httpGet url=… | urn:rdf:transrept as=text/turtle`) or pass `content=…`"
-                .to_string(),
-        )
-    })?;
+    // Core's typed refusal, unchanged: `MissingArgument` when absent (pipe a resource in, or
+    // pass `content=…`), `InvalidArgument` when not inline or not UTF-8.
+    let input = inv.inline_str("content")?;
     let as_type = inv.inline_str("as").unwrap_or("text/turtle");
     let (media, bytes) = transrept_bytes(input.as_bytes(), as_type)?;
     // Transreption is a pure function of its input bytes, so its output is *as
@@ -802,5 +796,38 @@ foaf:Person foaf:name "ignored" ."#;
             !t.from.contains(&"text/html".to_string()),
             "html is output-only"
         );
+    }
+
+    /// A required input left out is refused as core's typed `MissingArgument` naming it,
+    /// never an untyped endpoint error: the caller's omission, not this module's failure
+    /// (ikigai-conformance 0.8.0's REQUIRED check).
+    #[test]
+    fn a_missing_required_input_is_a_typed_missing_argument() {
+        let kernel = graph_kernel();
+        // (endpoint, the arguments given, the required one left out)
+        type Case = (
+            &'static str,
+            &'static [(&'static str, &'static str)],
+            &'static str,
+        );
+        let cases: [Case; 5] = [
+            ("urn:rdf:transrept", &[], "content"),
+            ("urn:rdf:union", &[("with", GRAPH_B)], "content"),
+            ("urn:rdf:union", &[("content", GRAPH_A)], "with"),
+            ("urn:rdf:diff", &[("with", GRAPH_B)], "content"),
+            ("urn:rdf:diff", &[("content", GRAPH_A)], "with"),
+        ];
+        for (iri, args, missing) in cases {
+            let mut request = Request::new(Verb::Source, Iri::parse(iri).unwrap());
+            for &(k, v) in args {
+                request = request.with_arg(k, ikigai_core::ArgRef::Inline(v.as_bytes().to_vec()));
+            }
+            match block_on(kernel.issue(request, &Capability::root())) {
+                Err(Error::MissingArgument(name)) => assert_eq!(name, missing, "{iri}"),
+                other => {
+                    panic!("{iri} without `{missing}`: expected MissingArgument, got {other:?}")
+                }
+            }
+        }
     }
 }

@@ -17,6 +17,7 @@ async-trait = "0.1"
 [dev-dependencies]
 futures = "0.3"
 # The module recipe as one test (`tests/conformance.rs`): walks every bound
-# endpoint and reports every violation at once. 0.6.0 for SPACE-NAME (ledger #987):
-# the suite holds `space()` to the name it claims.
-ikigai-conformance = "0.6.0"
+# endpoint and reports every violation at once. 0.8.0 for REQUIRED (ledger #329): a
+# required input dropped from the call must be refused with a typed MissingArgument.
+# A `^0.x` pin is a ceiling too: move it when the suite moves.
+ikigai-conformance = "0.8.0"
