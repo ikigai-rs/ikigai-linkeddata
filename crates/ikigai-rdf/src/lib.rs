@@ -18,7 +18,9 @@
 
 #![forbid(unsafe_code)]
 
+mod canonical;
 mod depth;
+pub use canonical::{canonical_triples, BlankNodeLabels};
 pub use depth::{
     check_json_nesting, check_rdfxml_nesting, check_turtle_nesting, JSON_LD_STACK,
     MAX_JSON_NESTING, MAX_TURTLE_NESTING,
@@ -28,7 +30,7 @@ use ikigai_core::{
     space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, FnEndpoint, Invocation,
     Iri, ReprType, Representation, Result, Verb,
 };
-use oxrdf::{Graph, NamedOrBlankNode, Quad, Term};
+use oxrdf::{Graph, NamedOrBlankNode, Quad, Term, Triple};
 use oxrdfio::{RdfFormat, RdfParser, RdfSerializer};
 
 /// The XSD `string` datatype IRI — the `class` of every by-value input here. An RDF
@@ -69,22 +71,30 @@ pub fn subclass_axioms(turtle: &str) -> Vec<(String, String)> {
 ///
 /// `arg` names the argument the text arrived in, which a depth refusal names (ledger #992):
 /// the nesting is bounded BEFORE the parser sees the text, since the parser itself recurses.
-fn parse_graph(turtle: &str, who: &str, arg: &str) -> Result<Graph> {
+///
+/// Blank nodes are relabeled through `labels` in document order (ledger #1566): the parser
+/// labels an anonymous node at random, and a cacheable answer must not. One `labels` across
+/// both of an operation's documents keeps a label the two documents share naming one node, as
+/// the parser's own labels did.
+fn parse_graph(turtle: &str, who: &str, arg: &str, labels: &mut BlankNodeLabels) -> Result<Graph> {
     check_turtle_nesting(turtle, arg)?;
     let mut graph = Graph::default();
     for quad in RdfParser::from_format(RdfFormat::Turtle).for_slice(turtle.as_bytes()) {
         let quad = quad.map_err(|e| Error::Endpoint(format!("{who}: RDF parse error: {e}")))?;
-        graph.insert(&quad.into());
+        graph.insert(&labels.triple(quad.into()));
     }
     Ok(graph)
 }
 
+/// Serialize `graph` as Turtle in ONE order (ledger #1566): a `Graph` iterates in the order of
+/// its interner's hashes, which a per-graph `RandomState` makes different on every run, so the
+/// triples are sorted. Its blank nodes were relabeled as they were parsed, so all are stable.
 fn serialize_graph(graph: &Graph) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut serializer = RdfSerializer::from_format(RdfFormat::Turtle).for_writer(&mut out);
-    for triple in graph.iter() {
+    for triple in canonical_triples(graph.iter().map(Triple::from), |_| true) {
         serializer
-            .serialize_triple(triple)
+            .serialize_triple(&triple)
             .map_err(|e| Error::Endpoint(format!("RDF serialize error: {e}")))?;
     }
     serializer
@@ -96,12 +106,16 @@ fn serialize_graph(graph: &Graph) -> Result<Vec<u8>> {
 /// The second graph: the `with=` argument — inline Turtle when it starts like a
 /// document, else an IRI sourced through the kernel (the compact-context
 /// pattern: inline literal OR resolve the reference).
-async fn with_graph(inv: &Invocation<'_>, who: &str) -> Result<Graph> {
+async fn with_graph(
+    inv: &Invocation<'_>,
+    who: &str,
+    labels: &mut BlankNodeLabels,
+) -> Result<Graph> {
     // Core's typed refusal, unchanged: `MissingArgument` when absent, `InvalidArgument` when
     // not inline or not UTF-8, so a caller can tell its own omission from a failure here.
     let with = inv.inline_str("with")?;
     if with.trim_start().starts_with('@') || with.trim_start().starts_with('<') {
-        return parse_graph(with, who, "with");
+        return parse_graph(with, who, "with", labels);
     }
     // Compose-marker convention: `with=<iri>?k=v&…` carries request arguments
     // (e.g. urn:org:agenda:week?as=text/turtle asks for the Turtle face).
@@ -124,7 +138,7 @@ async fn with_graph(inv: &Invocation<'_>, who: &str) -> Result<Graph> {
     let text = String::from_utf8(repr.bytes)
         .map_err(|_| Error::Endpoint(format!("{who}: {with} is not UTF-8 Turtle")))?;
     // A resolved graph is caller text too: `with=` named it, so a refusal names `with`.
-    parse_graph(&text, who, "with")
+    parse_graph(&text, who, "with", labels)
 }
 
 /// `urn:rdf:union` — the piped graph ∪ the `with=` graph, as Turtle. Set
@@ -137,8 +151,9 @@ impl Endpoint for UnionEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         // Typed refusals from core (`MissingArgument`/`InvalidArgument`), as in `with_graph`.
         let content = inv.inline_str("content")?;
-        let mut graph = parse_graph(content, "urn:rdf:union", "content")?;
-        for triple in with_graph(inv, "urn:rdf:union").await?.iter() {
+        let mut labels = BlankNodeLabels::new();
+        let mut graph = parse_graph(content, "urn:rdf:union", "content", &mut labels)?;
+        for triple in with_graph(inv, "urn:rdf:union", &mut labels).await?.iter() {
             graph.insert(triple);
         }
         // A set operation over its inputs: cacheable, and — as with transrept — only
@@ -190,8 +205,9 @@ impl Endpoint for DiffEndpoint {
         // Typed refusals from core (`MissingArgument`/`InvalidArgument`), as in `with_graph`.
         let content = inv.inline_str("content")?;
         let mode = inv.inline_str("mode").unwrap_or("added");
-        let ours = parse_graph(content, "urn:rdf:diff", "content")?;
-        let theirs = with_graph(inv, "urn:rdf:diff").await?;
+        let mut labels = BlankNodeLabels::new();
+        let ours = parse_graph(content, "urn:rdf:diff", "content", &mut labels)?;
+        let theirs = with_graph(inv, "urn:rdf:diff", &mut labels).await?;
         let (keep, exclude) = match mode {
             "added" => (&ours, &theirs),
             "removed" => (&theirs, &ours),
@@ -374,9 +390,17 @@ fn transrept_bytes(input: &[u8], as_type: &str) -> Result<(String, Vec<u8>)> {
 /// Parse `input` as `from` and serialize it as `as_type`: the half of [`transrept_bytes`] after
 /// the bounds, run on the JSON-LD thread when `from` is JSON-LD.
 fn convert(input: &[u8], from: RdfFormat, as_type: &str) -> Result<(String, Vec<u8>)> {
+    // Transreption streams, so its order is the document's and needs no sorting; but the
+    // parser labels anonymous nodes at random, so every face relabels them in document order
+    // (ledger #1566).
+    let mut labels = BlankNodeLabels::new();
+    let quads = RdfParser::from_format(from)
+        .for_slice(input)
+        .map(move |quad| quad.map(|quad| labels.quad(quad)));
+
     // The human view: a subject/predicate/object table over the parsed triples.
     if media_base(as_type) == "text/html" {
-        let html = to_html(RdfParser::from_format(from).for_slice(input))?;
+        let html = to_html(quads)?;
         return Ok(("text/html".to_string(), html.into_bytes()));
     }
 
@@ -390,7 +414,7 @@ fn convert(input: &[u8], from: RdfFormat, as_type: &str) -> Result<(String, Vec<
 
     let mut out = Vec::new();
     let mut serializer = RdfSerializer::from_format(to).for_writer(&mut out);
-    for quad in RdfParser::from_format(from).for_slice(input) {
+    for quad in quads {
         let quad = quad.map_err(|e| Error::Endpoint(format!("RDF parse error: {e}")))?;
         serializer
             .serialize_quad(&quad)
@@ -581,7 +605,13 @@ mod tests {
             request = request.with_arg(*k, ikigai_core::ArgRef::Inline(v.as_bytes().to_vec()));
         }
         let out = block_on(kernel.issue(request, &Capability::root())).unwrap();
-        parse_graph(&String::from_utf8(out.bytes).unwrap(), "test", "content").unwrap()
+        parse_graph(
+            &String::from_utf8(out.bytes).unwrap(),
+            "test",
+            "content",
+            &mut BlankNodeLabels::new(),
+        )
+        .unwrap()
     }
 
     #[test]

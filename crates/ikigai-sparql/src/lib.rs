@@ -84,6 +84,7 @@ use ikigai_core::{
     space_iri, ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation,
     Iri, ReprType, Representation, Request, Result, Verb,
 };
+use ikigai_rdf::{canonical_triples, BlankNodeLabels};
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::{GraphName, NamedNodeRef};
 use oxigraph::sparql::results::{QueryResultsFormat, QueryResultsSerializer};
@@ -379,10 +380,44 @@ pub fn load_vocabulary(store: &Store) -> Result<()> {
 /// mounts `urn:ikigai:vocab`; it's static, so it carries no golden thread and doesn't
 /// affect cacheability. Callers add their `graph=` sources on top, then union the default
 /// graph — so `?e rdf:type/rdfs:subClassOf* ik:Endpoint` joins instances to this schema.
-fn store_with_vocabulary() -> Result<Store> {
+///
+/// Loaded through `labels` (see [`load_relabeled`]), unlike the public [`load_vocabulary`],
+/// so this store's every blank node carries a label `labels` issued.
+fn store_with_vocabulary(labels: &mut BlankNodeLabels) -> Result<Store> {
     let store = Store::new().map_err(|e| Error::Endpoint(format!("store init: {e}")))?;
-    load_vocabulary(&store)?;
+    let vocab_graph = NamedNodeRef::new(ikigai_vocab::VOCAB_IRI)
+        .map_err(|e| Error::Endpoint(format!("vocab graph name: {e}")))?;
+    load_relabeled(
+        &store,
+        RdfParser::from_format(RdfFormat::Turtle).with_default_graph(vocab_graph),
+        ikigai_vocab::VOCABULARY.as_bytes(),
+        labels,
+    )
+    .map_err(|e| Error::Endpoint(format!("loading the ikigai vocabulary: {e}")))?;
     Ok(store)
+}
+
+/// Load one document into the per-query `store`, its blank nodes relabeled through `labels` in
+/// document order (ledger #1566). `Store::load_from_slice` renames every blank node to a RANDOM
+/// label, so an answer that showed one (a selected anonymous node, a DESCRIBE of a subject with
+/// a `[ … ]`) differed on every fresh store, under a `.cacheable()` that promises it does not.
+/// Each document starts a new one in `labels`, so a label two sources share names two nodes,
+/// as the rename did: RDF merge, not union by label.
+///
+/// Only for the PER-QUERY store, where `labels` issued every label in it. A shared store holds
+/// the caller's own blank nodes, and a label issued here could collide with one of them.
+fn load_relabeled(
+    store: &Store,
+    parser: RdfParser,
+    bytes: &[u8],
+    labels: &mut BlankNodeLabels,
+) -> std::result::Result<(), String> {
+    labels.new_document();
+    let mut quads = Vec::new();
+    for quad in parser.for_slice(bytes) {
+        quads.push(labels.quad(quad.map_err(|e| e.to_string())?));
+    }
+    store.extend(quads).map_err(|e| e.to_string())
 }
 
 /// One SPARQL query form bound to `urn:sparql:{verb}`. Resolution is identical across all
@@ -433,7 +468,8 @@ impl Endpoint for SparqlEndpoint {
                         .to_string(),
                 ));
             }
-            let (media, bytes) = query_within_budget(query_str, store, as_type, budget, answer)?;
+            let (media, bytes) =
+                query_within_budget(query_str, store, as_type, budget, answer, None)?;
             return Ok(Representation::new(utf8_repr(&media), bytes));
         }
 
@@ -449,7 +485,11 @@ impl Endpoint for SparqlEndpoint {
         // Each source is scanned for depth as soon as it arrives, so a refusal costs no further
         // resolution, and all of them are loaded together on a sized thread: oxigraph's parsers
         // recurse, and a stack overflow aborts the host (ledger #1043, see `check_source`).
-        let store = store_with_vocabulary()?;
+        // One relabeler for the whole store: every blank node in it gets a label issued here,
+        // which is what lets a CONSTRUCT's answer tell the template's fresh nodes from the
+        // sources' (see `serialize_results`).
+        let mut labels = BlankNodeLabels::new();
+        let store = store_with_vocabulary(&mut labels)?;
         let mut sources = Vec::new();
         for uri in graph_list
             .split([',', ' ', '\n', '\t'])
@@ -467,20 +507,20 @@ impl Endpoint for SparqlEndpoint {
             // parsed here, so none is passed to size it by (see the assertion after `check_source`).
             limits::on_sparql_stack("", || {
                 for (graph, format, source) in &sources {
-                    store
-                        .load_from_slice(
-                            RdfParser::from_format(*format).with_default_graph(*graph),
-                            &source.bytes,
-                        )
-                        .map_err(|e| {
-                            Error::Endpoint(format!("loading <{}>: {e}", graph.as_str()))
-                        })?;
+                    load_relabeled(
+                        &store,
+                        RdfParser::from_format(*format).with_default_graph(*graph),
+                        &source.bytes,
+                        &mut labels,
+                    )
+                    .map_err(|e| Error::Endpoint(format!("loading <{}>: {e}", graph.as_str())))?;
                 }
                 Ok(())
             })?;
         }
 
-        let (media, bytes) = query_within_budget(query_str, &store, as_type, budget, answer)?;
+        let (media, bytes) =
+            query_within_budget(query_str, &store, as_type, budget, answer, Some(&labels))?;
         Ok(Representation::new(utf8_repr(&media), bytes).cacheable())
     }
 
@@ -921,16 +961,26 @@ fn answer_args(desc: Description, bound: budget::AnswerBound) -> Description {
 /// A query the deadline catches is refused whatever it returned: it either stopped part-way
 /// (and a partial answer is not an answer) or finished late, past a bound that refuses. An
 /// answer that grows past `bound` is refused the same way, as it grows (ledger #970).
+///
+/// `stable` is the relabeler that loaded a per-query store, whose answer is cacheable and so
+/// must be one set of bytes: see [`serialize_results`]. `None` for a shared store.
 fn query_within_budget(
     query_str: &str,
     store: &Store,
     as_type: Option<&str>,
     budget: Duration,
     bound: budget::AnswerBound,
+    stable: Option<&BlankNodeLabels>,
 ) -> Result<(String, Vec<u8>)> {
     let (answer, fired) = budget::with_deadline(budget, |token| {
         limits::on_sparql_stack(query_str, || {
-            serialize_results(evaluate(query_str, store, token)?, as_type, token, bound)
+            serialize_results(
+                evaluate(query_str, store, token)?,
+                as_type,
+                token,
+                bound,
+                stable,
+            )
         })
     })?;
     if fired {
@@ -999,11 +1049,21 @@ fn stopped() -> Error {
 /// `bound.rows()` is refused before it is serialized, and every write goes through a
 /// [`budget::CappedWriter`] that refuses the one past `bound.bytes()`. Either way the answer is
 /// [`budget::too_large`] and nothing of it is returned. `ASK` is exempt: one boolean.
+///
+/// With `stable` (the per-query store, whose answers are cacheable), a CONSTRUCT or DESCRIBE
+/// graph is held and written in ONE order (ledger #1566): sorted, with the blank nodes the
+/// query minted (a template's `_:x` or `[ ]`, a `BNODE()`), which carry random labels, labeled
+/// by structure; the nodes `stable` issued while loading keep theirs. The store's own order
+/// follows its hashing, which is fresh on every store. A SELECT's rows are left in the order the
+/// query produced: a query that wants an order says `ORDER BY`, and no sort here could repair a
+/// `LIMIT` that chose different rows. Without `stable` (a shared store, uncacheable) the graph
+/// streams as it is produced.
 fn serialize_results(
     results: QueryResults,
     as_type: Option<&str>,
     token: &CancellationToken,
     bound: budget::AnswerBound,
+    stable: Option<&BlankNodeLabels>,
 ) -> Result<(String, Vec<u8>)> {
     let io = |e: std::io::Error| Error::Endpoint(format!("serialize: {e}"));
     match results {
@@ -1045,6 +1105,7 @@ fn serialize_results(
             let written = (|| {
                 let mut serializer = RdfSerializer::from_format(format).for_writer(&mut out);
                 let mut rows: u64 = 0;
+                let mut held = Vec::new();
                 for triple in triples {
                     if token.is_cancelled() {
                         return Err(stopped());
@@ -1054,9 +1115,23 @@ fn serialize_results(
                         return Err(budget::too_large(budget::Measure::Triples, bound.rows()));
                     }
                     let triple = triple.map_err(|e| Error::Endpoint(format!("query: {e}")))?;
-                    serializer
-                        .serialize_quad(&triple.in_graph(GraphName::DefaultGraph))
-                        .map_err(io)?;
+                    if stable.is_some() {
+                        held.push(triple);
+                    } else {
+                        serializer
+                            .serialize_quad(&triple.in_graph(GraphName::DefaultGraph))
+                            .map_err(io)?;
+                    }
+                }
+                if let Some(labels) = stable {
+                    for triple in canonical_triples(held, |node| labels.is_issued(node)) {
+                        if token.is_cancelled() {
+                            return Err(stopped());
+                        }
+                        serializer
+                            .serialize_quad(&triple.in_graph(GraphName::DefaultGraph))
+                            .map_err(io)?;
+                    }
                 }
                 serializer.finish().map_err(io)?;
                 Ok(())
@@ -1284,7 +1359,7 @@ mod tests {
     /// Test helper: load named graphs from inline Turtle, run a query, return (media, body).
     /// Pre-seeds the bundled vocabulary exactly as production does (`store_with_vocabulary`).
     fn run(graphs: &[(&str, &str)], query: &str, as_type: Option<&str>) -> (String, String) {
-        let store = store_with_vocabulary().unwrap();
+        let store = store_with_vocabulary(&mut BlankNodeLabels::new()).unwrap();
         for (uri, ttl) in graphs {
             store
                 .load_from_slice(
@@ -1297,7 +1372,8 @@ mod tests {
         let token = CancellationToken::new();
         let results = evaluate(query, &store, &token).unwrap();
         let (media, bytes) =
-            serialize_results(results, as_type, &token, budget::AnswerBound::DEFAULT).unwrap();
+            serialize_results(results, as_type, &token, budget::AnswerBound::DEFAULT, None)
+                .unwrap();
         (media, String::from_utf8(bytes).unwrap())
     }
 
@@ -1327,7 +1403,7 @@ mod tests {
     fn a_urn_named_graph_is_queryable_when_its_media_type_is_unknown() {
         // End to end through the same path production takes: an untyped source, sniffed,
         // loaded as a named graph, queried. Before the fix the load failed outright.
-        let store = store_with_vocabulary().unwrap();
+        let store = store_with_vocabulary(&mut BlankNodeLabels::new()).unwrap();
         let ttl = "<urn:demo:a> <urn:demo:p> \"Ada\" .\n";
         assert_eq!(sniff(ttl.as_bytes()), RdfFormat::Turtle);
         store
@@ -1349,6 +1425,7 @@ mod tests {
             Some("text/csv"),
             &token,
             budget::AnswerBound::DEFAULT,
+            None,
         )
         .unwrap();
         assert!(String::from_utf8(bytes).unwrap().contains("Ada"));
@@ -1507,7 +1584,7 @@ mod tests {
 
     /// Like [`run`], but hands back the `Result` so a refusal is observable.
     fn try_run(graphs: &[(&str, &str)], query: &str, as_type: Option<&str>) -> Result<String> {
-        let store = store_with_vocabulary().unwrap();
+        let store = store_with_vocabulary(&mut BlankNodeLabels::new()).unwrap();
         for (uri, ttl) in graphs {
             store
                 .load_from_slice(
@@ -1519,7 +1596,7 @@ mod tests {
         }
         let token = CancellationToken::new();
         let results = evaluate(query, &store, &token).unwrap();
-        serialize_results(results, as_type, &token, budget::AnswerBound::DEFAULT)
+        serialize_results(results, as_type, &token, budget::AnswerBound::DEFAULT, None)
             .map(|(media, _)| media)
     }
 
