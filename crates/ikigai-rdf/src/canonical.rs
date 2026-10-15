@@ -50,9 +50,13 @@ use std::collections::{HashMap, HashSet};
 /// assert_eq!(t.to_string(), "_:b1 <urn:p> _:b2");
 /// ```
 ///
-/// ⚠ A blank node nested inside an RDF 1.2 triple term (`<<( [] :p :o )>>`) is not relabeled:
-/// this crate does not name the triple-term variant, which only exists when some crate in the
-/// build turns `oxrdf/rdf-12` on.
+/// A blank node inside an RDF 1.2 triple term (`<<( [] :p :o )>>`) is relabeled too, in the
+/// same document order, under this crate's `rdf-12` feature (ledger #1575). ⚠ Only under it:
+/// the triple-term variant exists only when `oxrdf/rdf-12` is on, and this crate can name it only
+/// when its own feature says so. A build where ANOTHER crate turns `oxrdf/rdf-12` on and this
+/// feature is off has triple terms that are passed through untouched, and that is worse than a
+/// random label: a node written both outside and inside a triple term (`_:x :p <<( _:x :q :r )>>`)
+/// is split in two, and a document's own `_:b0` inside one can meet an issued `_:b0` outside.
 ///
 /// [`new_document`]: BlankNodeLabels::new_document
 #[derive(Debug, Default)]
@@ -121,11 +125,119 @@ impl BlankNodeLabels {
     }
 
     fn object(&mut self, object: Term) -> Term {
-        match object {
-            Term::BlankNode(node) => self.node(&node).into(),
-            // A literal, an IRI, or (under `oxrdf/rdf-12`) a triple term, kept as it is.
-            other => other,
+        map_term(object, &mut |node| self.node(&node))
+    }
+}
+
+/// `term` with every blank node in it replaced by `f`'s answer, in document order: through a
+/// triple term's subject, then into its object, under the `rdf-12` feature.
+///
+/// Iterative. In RDF 1.2 only a triple term's OBJECT can be another triple term (its subject is
+/// an IRI or a blank node), so nesting is a chain, walked down into a stack and rebuilt from the
+/// bottom: no recursion here however deep the term (ledger #992's lesson for caller input). What
+/// still recurses is oxrdf's own handling of the result (`Display`, `Hash`, `Drop`), which is why
+/// the doors bound caller nesting at `MAX_TURTLE_NESTING` before parsing.
+fn map_term(term: Term, f: &mut impl FnMut(BlankNode) -> BlankNode) -> Term {
+    #[cfg(feature = "rdf-12")]
+    {
+        let mut spine: Vec<(NamedOrBlankNode, oxrdf::NamedNode)> = Vec::new();
+        let mut term = term;
+        let leaf = loop {
+            match term {
+                Term::Triple(triple) => {
+                    let Triple {
+                        subject,
+                        predicate,
+                        object,
+                    } = *triple;
+                    spine.push((map_subject(subject, f), predicate));
+                    term = object;
+                }
+                Term::BlankNode(node) => break Term::BlankNode(f(node)),
+                other => break other,
+            }
+        };
+        spine
+            .into_iter()
+            .rev()
+            .fold(leaf, |object, (subject, predicate)| {
+                Term::Triple(Box::new(Triple::new(subject, predicate, object)))
+            })
+    }
+    #[cfg(not(feature = "rdf-12"))]
+    match term {
+        Term::BlankNode(node) => Term::BlankNode(f(node)),
+        // A literal, an IRI, or (when another crate turns `oxrdf/rdf-12` on) a triple term,
+        // which this build cannot name and so keeps as it is: see `BlankNodeLabels`.
+        other => other,
+    }
+}
+
+fn map_subject(
+    subject: NamedOrBlankNode,
+    f: &mut impl FnMut(BlankNode) -> BlankNode,
+) -> NamedOrBlankNode {
+    match subject {
+        NamedOrBlankNode::BlankNode(node) => NamedOrBlankNode::BlankNode(f(node)),
+        other => other,
+    }
+}
+
+/// The blank nodes in `term`, in document order, through nested triple terms under the
+/// `rdf-12` feature. Iterative, as [`map_term`] is.
+#[cfg(feature = "rdf-12")]
+fn term_blank_nodes<'a>(mut term: &'a Term, out: &mut Vec<&'a BlankNode>) {
+    while let Term::Triple(triple) = term {
+        if let NamedOrBlankNode::BlankNode(node) = &triple.subject {
+            out.push(node);
         }
+        term = &triple.object;
+    }
+    if let Term::BlankNode(node) = term {
+        out.push(node);
+    }
+}
+
+#[cfg(not(feature = "rdf-12"))]
+fn term_blank_nodes<'a>(term: &'a Term, out: &mut Vec<&'a BlankNode>) {
+    if let Term::BlankNode(node) = term {
+        out.push(node);
+    }
+}
+
+/// `term` as N-Triples text, except that each blank node is written as `blank` says. Iterative,
+/// as [`map_term`] is; the triple-term form is oxrdf's, `<<( s p o )>>`.
+#[cfg(feature = "rdf-12")]
+fn write_term(mut term: &Term, blank: &impl Fn(&BlankNode) -> String) -> String {
+    let mut text = String::new();
+    let mut close = 0usize;
+    while let Term::Triple(triple) = term {
+        let subject = match &triple.subject {
+            NamedOrBlankNode::BlankNode(node) => blank(node),
+            other => other.to_string(),
+        };
+        text.push_str(&format!("<<( {subject} {} ", triple.predicate));
+        close += 1;
+        term = &triple.object;
+    }
+    text.push_str(&write_term_leaf(term, blank));
+    for _ in 0..close {
+        text.push_str(" )>>");
+    }
+    text
+}
+
+#[cfg(not(feature = "rdf-12"))]
+fn write_term(term: &Term, blank: &impl Fn(&BlankNode) -> String) -> String {
+    write_term_leaf(term, blank)
+}
+
+/// A term that is not a triple term (or, without the `rdf-12` feature, one this build cannot
+/// look inside), as N-Triples text with its blank node written as `blank` says.
+fn write_term_leaf(term: &Term, blank: &impl Fn(&BlankNode) -> String) -> String {
+    match term {
+        Term::BlankNode(node) => blank(node),
+        other => other.to_string(),
     }
 }
 
@@ -158,6 +270,9 @@ impl BlankNodeLabels {
 /// assert_eq!(run([1, 2]), run([2, 1]));
 /// assert_eq!(run([1, 2]), "<urn:s:1> <urn:p> _:c0 .\n<urn:s:2> <urn:p> _:c1 .\n");
 /// ```
+///
+/// A blank node inside an RDF 1.2 triple term is found and relabeled like any other, under the
+/// `rdf-12` feature (see [`BlankNodeLabels`] for what a build without it does).
 ///
 /// ⚠ Not a full canonicalization: refinement can leave nodes tied that are NOT
 /// interchangeable (highly regular blank-node structures), and then the label they get can
@@ -235,18 +350,12 @@ pub fn canonical_triples(
         }
     }
 
-    let relabel = |node: &BlankNode| labels.get(node).cloned().unwrap_or_else(|| node.clone());
+    let mut relabel = |node: BlankNode| labels.get(&node).cloned().unwrap_or(node);
     let mut out: Vec<Triple> = triples
         .into_iter()
         .map(|t| {
-            let subject = match t.subject {
-                NamedOrBlankNode::BlankNode(node) => relabel(&node).into(),
-                other => other,
-            };
-            let object = match t.object {
-                Term::BlankNode(node) => relabel(&node).into(),
-                other => other,
-            };
+            let subject = map_subject(t.subject, &mut relabel);
+            let object = map_term(t.object, &mut relabel);
             Triple::new(subject, t.predicate, object)
         })
         .collect();
@@ -268,18 +377,15 @@ fn find(parent: &mut [usize], mut n: usize) -> usize {
     n
 }
 
-/// The blank nodes in subject and object position (a triple term's are not reached; see
-/// [`BlankNodeLabels`]).
+/// The blank nodes in `triple`, in document order: its subject, then its object's, which under
+/// the `rdf-12` feature reaches into a triple term (see [`BlankNodeLabels`] for a build without).
 fn blank_nodes(triple: &Triple) -> impl Iterator<Item = &BlankNode> {
-    let subject = match &triple.subject {
-        NamedOrBlankNode::BlankNode(node) => Some(node),
-        _ => None,
-    };
-    let object = match &triple.object {
-        Term::BlankNode(node) => Some(node),
-        _ => None,
-    };
-    subject.into_iter().chain(object)
+    let mut out = Vec::new();
+    if let NamedOrBlankNode::BlankNode(node) = &triple.subject {
+        out.push(node);
+    }
+    term_blank_nodes(&triple.object, &mut out);
+    out.into_iter()
 }
 
 /// One component's nodes in canonical order, with the component's canonical text (its triples
@@ -299,22 +405,16 @@ fn canonical_component(
     // or `#color` (any other); everything else as N-Triples.
     let render = |row: usize, colors: &[usize], me: Option<usize>| -> String {
         let triple = &triples[row];
-        let term = |node: Option<&BlankNode>, text: String| match node
-            .and_then(|b| index.get(b))
-            .and_then(|n| local.get(n))
-        {
+        let blank = |node: &BlankNode| match index.get(node).and_then(|n| local.get(n)) {
             Some(&l) if Some(l) == me => "@".to_string(),
             Some(&l) => format!("#{}", colors[l]),
-            None => text,
+            None => node.to_string(),
         };
         let subject = match &triple.subject {
-            NamedOrBlankNode::BlankNode(node) => term(Some(node), node.to_string()),
+            NamedOrBlankNode::BlankNode(node) => blank(node),
             other => other.to_string(),
         };
-        let object = match &triple.object {
-            Term::BlankNode(node) => term(Some(node), node.to_string()),
-            other => other.to_string(),
-        };
+        let object = write_term(&triple.object, &blank);
         format!("{subject} {} {object}", triple.predicate)
     };
 
@@ -452,6 +552,92 @@ mod tests {
         assert_eq!(
             text(&out),
             "_:c0 <urn:p> _:c1 .\n_:c1 <urn:v> \"1\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n"
+        );
+    }
+
+    /// `<<( s p o )>>` as a term.
+    #[cfg(feature = "rdf-12")]
+    fn quoted(s: impl Into<NamedOrBlankNode>, p: &str, o: impl Into<Term>) -> Term {
+        Term::Triple(Box::new(Triple::new(s, iri(p), o)))
+    }
+
+    #[cfg(feature = "rdf-12")]
+    #[test]
+    fn blank_nodes_inside_triple_terms_are_relabeled_in_document_order() {
+        // `_:x <urn:p> <<( _:y <urn:q> <<( _:x <urn:r> _:z )>> )>>`, with random labels.
+        let (x, y, z) = (
+            BlankNode::default(),
+            BlankNode::default(),
+            BlankNode::default(),
+        );
+        let term = quoted(y, "urn:q", quoted(x.clone(), "urn:r", z));
+        let mut labels = BlankNodeLabels::new();
+        let out = labels.triple(Triple::new(x, iri("urn:p"), term));
+        // One node `_:x` stays one node, inside the triple term and out.
+        assert_eq!(
+            out.to_string(),
+            "_:b0 <urn:p> <<( _:b1 <urn:q> <<( _:b0 <urn:r> _:b2 )>> )>>"
+        );
+        for label in ["b0", "b1", "b2"] {
+            assert!(labels.is_issued(&BlankNode::new(label).unwrap()), "{label}");
+        }
+    }
+
+    #[cfg(feature = "rdf-12")]
+    #[test]
+    fn canonical_triples_labels_blank_nodes_inside_triple_terms_by_structure() {
+        // What a CONSTRUCT `{ ?s <urn:says> <<( _:x <urn:v> ?v )>> }` yields for each value,
+        // minting a fresh `_:x` per solution, arriving in different orders.
+        let make = |values: &[u32]| -> Vec<Triple> {
+            values
+                .iter()
+                .map(|v| {
+                    let term = quoted(BlankNode::default(), "urn:v", Literal::from(*v));
+                    Triple::new(iri("urn:s"), iri("urn:says"), term)
+                })
+                .collect()
+        };
+        let first = text(&canonical_triples(make(&[1, 2, 3]), |_| false));
+        assert_eq!(text(&canonical_triples(make(&[3, 1, 2]), |_| false)), first);
+        assert!(
+            first.contains("<<( _:c0 <urn:v> \"1\""),
+            "the template node is relabeled: {first}"
+        );
+        assert!(
+            !first.contains("_:c3"),
+            "three nodes, three labels: {first}"
+        );
+    }
+
+    #[cfg(feature = "rdf-12")]
+    #[test]
+    fn relabeling_a_deep_triple_term_does_not_recurse() {
+        // 20,000 levels on a 256 KiB thread: a relabel that recursed once per level would need
+        // far more stack than that. The result is leaked, not dropped: oxrdf's `Drop` for a
+        // nested triple term recurses (which is why the doors bound caller nesting at 64).
+        let deep = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let mut term = Term::from(BlankNode::default());
+                for _ in 0..20_000 {
+                    term = quoted(BlankNode::default(), "urn:p", term);
+                }
+                let mut labels = BlankNodeLabels::new();
+                let out = labels.triple(Triple::new(iri("urn:s"), iri("urn:p"), term));
+                let mut found = Vec::new();
+                term_blank_nodes(&out.object, &mut found);
+                let first = found.first().map(|b| b.as_str().to_string());
+                let last = found.last().map(|b| b.as_str().to_string());
+                let count = found.len();
+                std::mem::forget(out);
+                (count, first, last)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(
+            deep,
+            (20_001, Some("b0".to_string()), Some("b20000".to_string()))
         );
     }
 

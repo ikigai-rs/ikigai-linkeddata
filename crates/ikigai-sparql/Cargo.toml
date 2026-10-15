@@ -38,6 +38,11 @@ async-trait = "0.1"
 # under it in CI's `features:` job and proves SERVICE and LOAD still reach no network. Turning it
 # on gives a consumer nothing: no door here uses the client, which is the point.
 http-client-probe = ["oxigraph/http-client"]
+# RDF 1.2 (ledger #1575): `ikigai-rdf/rdf-12`, so a source's blank nodes inside triple terms are
+# relabeled as it loads and a CONSTRUCT's are labeled by structure, and `oxigraph/rdf-12` with
+# it, because an rdf-12 oxrdf does not compile oxigraph's own crates (sparesults, spargebra)
+# unless oxigraph turns their RDF 1.2 support on too. One feature, so a host cannot turn on half.
+rdf-12 = ["ikigai-rdf/rdf-12", "oxigraph/rdf-12"]
 
 [dev-dependencies]
 # block_on for driving kernel.issue in the shared-store tests.
