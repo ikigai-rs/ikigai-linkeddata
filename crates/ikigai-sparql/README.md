@@ -202,8 +202,10 @@ template's `_:x` or `[ ]`, a `BNODE()`) labeled by their structure
 (`ikigai_rdf::canonical_triples`). A SELECT's rows keep the order the query produced: say
 `ORDER BY` when the order matters. Without it the order is the store's, which measured stable
 for every query tried except one that enumerates graphs (`GRAPH ?g {}`), and no sort afterward
-could repair a `LIMIT` that picked different rows. The shared-store variant is uncacheable and
-streams as before.
+could repair a `LIMIT` that picked different rows. So that one is fixed at its source (ledger
+#1574): a query that names no `FROM NAMED` is handed the store's named graphs as a list in
+N-Triples text order, the same set in one order, and `GRAPH ?g` walks that list rather than the
+store's hashed graph map. The shared-store variant is uncacheable and streams as before.
 
 ## No network from SPARQL
 

@@ -13,4 +13,7 @@ jobs:
       # `http-client-probe` compiles oxigraph's HTTP client in, as a host's build does when rudof
       # unifies `oxigraph/http-client` on (ledger #1083), and tests/sparql_service_egress.rs then
       # proves SERVICE and LOAD still reach no network. Not `*`: the point is ONE named build.
-      features: http-client-probe
+      # `rdf-12` (ikigai-rdf and ikigai-sparql both declare it) compiles the relabeling inside
+      # RDF 1.2 triple terms and the tests behind `#[cfg(feature = "rdf-12")]` (ledger #1575):
+      # without this job nothing builds that path (field guide 9c).
+      features: http-client-probe rdf-12

@@ -975,7 +975,7 @@ fn query_within_budget(
     let (answer, fired) = budget::with_deadline(budget, |token| {
         limits::on_sparql_stack(query_str, || {
             serialize_results(
-                evaluate(query_str, store, token)?,
+                evaluate(query_str, store, token, stable.is_some())?,
                 as_type,
                 token,
                 bound,
@@ -1011,10 +1011,30 @@ fn query_within_budget(
 ///
 /// Parsed with spargebra directly, so the algebra can be measured against the budget's
 /// bounds BEFORE oxigraph plans it: planning cannot be cancelled (see [`budget`]).
+///
+/// `per_query` is the per-query store, whose answer is cacheable: a query that names no
+/// `FROM NAMED` is handed the store's named graphs as an explicit list, in N-Triples text order
+/// (ledger #1574). The SET is the store's own, so `GRAPH ?g` reaches exactly what it did; only
+/// the ORDER is fixed. Without the list, `GRAPH ?g {}` (and any empty group inside a `GRAPH ?g`,
+/// which sparopt lowers to the same graph scan) walks oxigraph's in-memory graph map, a
+/// `DashMap` under a per-store `RandomState`, so it gave a different row order on every fresh
+/// store, under a `.cacheable()` that promises one set of bytes. Loading the graphs in a fixed
+/// order does not help: they already load in one order (the vocabulary, then each `graph=` in
+/// turn), and the map's iteration does not follow it. The rows themselves are not sorted, so a
+/// `LIMIT` without `ORDER BY` picks the same rows on every store.
+///
+/// The cost: one pass over the store's named graphs and a sort, per query. And a `GRAPH ?g { … }`
+/// pattern is now evaluated graph by graph in that order, where it was one scan of every quad;
+/// a pattern with a selective term (`GRAPH ?g { <s> ?p ?o }`) then costs a lookup per named
+/// graph instead of one. Measured 2026-10-15 (release build, a TriG source of N named graphs of
+/// 10 triples each, the whole request, median of 15 fresh kernels): within 0.1 to 0.4 ms of the
+/// old cost at N = 1 and 100, and about 82 ms becoming about 86 ms at N = 10,000, where loading
+/// the source dominates both.
 fn evaluate<'a>(
     query_str: &str,
     store: &'a Store,
     token: &CancellationToken,
+    per_query: bool,
 ) -> Result<QueryResults<'a>> {
     let query = SparqlParser::new()
         .parse_query(query_str)
@@ -1028,6 +1048,16 @@ fn evaluate<'a>(
     // the right default only when there were none.
     if prepared.dataset().is_default_dataset() {
         prepared.dataset_mut().set_default_graph_as_union();
+    }
+    // After the union: the list would make the dataset read as stated. A query's own
+    // `FROM NAMED` (or a bare `FROM`, which states an empty list) already fixed this.
+    if per_query && prepared.dataset().available_named_graphs().is_none() {
+        let mut graphs = store
+            .named_graphs()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Endpoint(format!("listing the named graphs: {e}")))?;
+        graphs.sort_by_cached_key(|graph| graph.to_string());
+        prepared.dataset_mut().set_available_named_graphs(graphs);
     }
     prepared
         .on_store(store)
@@ -1370,7 +1400,7 @@ mod tests {
                 .unwrap();
         }
         let token = CancellationToken::new();
-        let results = evaluate(query, &store, &token).unwrap();
+        let results = evaluate(query, &store, &token, false).unwrap();
         let (media, bytes) =
             serialize_results(results, as_type, &token, budget::AnswerBound::DEFAULT, None)
                 .unwrap();
@@ -1418,6 +1448,7 @@ mod tests {
             "SELECT ?o WHERE { GRAPH <urn:demo:graph> { <urn:demo:a> <urn:demo:p> ?o } }",
             &store,
             &token,
+            false,
         )
         .unwrap();
         let (_, bytes) = serialize_results(
@@ -1595,7 +1626,7 @@ mod tests {
                 .unwrap();
         }
         let token = CancellationToken::new();
-        let results = evaluate(query, &store, &token).unwrap();
+        let results = evaluate(query, &store, &token, false).unwrap();
         serialize_results(results, as_type, &token, budget::AnswerBound::DEFAULT, None)
             .map(|(media, _)| media)
     }

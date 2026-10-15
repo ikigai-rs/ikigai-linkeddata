@@ -103,6 +103,15 @@ collection, a JSON-LD node without `@id`, an RDF/XML node without `rdf:about`) a
 Transreption keeps the document's order. Both tools are public:
 [`BlankNodeLabels`](src/canonical.rs) and [`canonical_triples`](src/canonical.rs).
 
+**RDF 1.2: turn on the `rdf-12` feature** (ledger #1575). It turns on the parsers' RDF 1.2
+support (`oxrdf/rdf-12`, `oxrdfio/rdf-12`) and relabels the blank nodes INSIDE triple terms
+(`<<( [] ex:p ex:o )>>`) in the same document order. ⚠ Feature unification does not carry it: a
+build where another crate turns `oxrdf/rdf-12` on (rudof does) has triple terms, and without this
+feature their blank nodes pass through untouched. That is worse than a random label: a node
+written both outside and inside a triple term (`_:x ex:p <<( _:x ex:q ex:r )>>`) is split in two.
+A host that parses RDF 1.2 turns this on; one with `ikigai-sparql` in it turns on
+`ikigai-sparql/rdf-12`, which carries this one and the oxigraph feature it needs.
+
 ## Conformance
 
 Passes [`ikigai-conformance`](https://crates.io/crates/ikigai-conformance)
