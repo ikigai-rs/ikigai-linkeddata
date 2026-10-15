@@ -95,6 +95,14 @@ pipe rather than being asserted unconditionally.
 the piped graph and `with=`, inheriting the `with=` resolution's expiry when that named a
 resource rather than inline Turtle.
 
+Cacheable also means **the same bytes when it is recomputed** (ledger #1566). Union and diff
+write their set sorted by N-Triples text: an `oxrdf::Graph` iterates in an order its
+per-graph hashing picks afresh every time. And every face relabels blank nodes in document
+order (`_:b0`, `_:b1`, …), because the parsers label an anonymous node (`[ … ]`, a
+collection, a JSON-LD node without `@id`, an RDF/XML node without `rdf:about`) at random.
+Transreption keeps the document's order. Both tools are public:
+[`BlankNodeLabels`](src/canonical.rs) and [`canonical_triples`](src/canonical.rs).
+
 ## Conformance
 
 Passes [`ikigai-conformance`](https://crates.io/crates/ikigai-conformance)

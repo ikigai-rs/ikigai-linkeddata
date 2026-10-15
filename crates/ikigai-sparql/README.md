@@ -194,6 +194,17 @@ a change to any underlying graph auto-invalidates the cached result. An `http(s)
 is fetched via `urn:httpGet`, so its own cache policy propagates into the query result;
 `urn:`/`file:` graphs resolve directly.
 
+Cacheable also means **the same bytes when it is recomputed** (ledger #1566). Each query runs
+over a fresh store, so two things that store would choose afresh are fixed: a source's blank
+nodes are labeled in document order as it loads (oxigraph's loader labels them at random), and a
+CONSTRUCT or DESCRIBE graph is written sorted, with the blank nodes the query itself mints (a
+template's `_:x` or `[ ]`, a `BNODE()`) labeled by their structure
+(`ikigai_rdf::canonical_triples`). A SELECT's rows keep the order the query produced: say
+`ORDER BY` when the order matters. Without it the order is the store's, which measured stable
+for every query tried except one that enumerates graphs (`GRAPH ?g {}`), and no sort afterward
+could repair a `LIMIT` that picked different rows. The shared-store variant is uncacheable and
+streams as before.
+
 ## No network from SPARQL
 
 **`SERVICE` and `LOAD` are refused on every door, before evaluation** (ledger #1083). Both
