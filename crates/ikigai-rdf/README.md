@@ -15,7 +15,7 @@ compiles to `wasm32` and the browser can transrept a fetched graph **client-side
 
 | Resource | Arg | Meaning |
 | --- | --- | --- |
-| `urn:rdf:transrept` | `content` | the RDF document to transrept — usually piped in (e.g. from `urn:httpGet`) |
+| `urn:rdf:transrept` | `content` | the RDF document to transrept — usually piped in (e.g. from `urn:http:get`) |
 | | `as` | target representation (default `text/turtle`) |
 
 The input syntax is sniffed from its opening tokens (`{`/`[` → JSON-LD; a leading
@@ -36,10 +36,10 @@ human-readable subject/predicate/object table over the parsed triples. Short ali
 
 ```shell
 # Fetch a graph and re-serialize it to N-Triples, all client-side:
-source urn:httpGet url=https://example.org/thing | urn:rdf:transrept as=application/n-triples
+source urn:http:get url=https://example.org/thing | urn:rdf:transrept as=application/n-triples
 
 # Render any graph as an HTML table:
-source urn:httpGet url=https://example.org/thing | urn:rdf:transrept as=text/html
+source urn:http:get url=https://example.org/thing | urn:rdf:transrept as=text/html
 ```
 
 Mount it in any kernel — the CLI's embedded space, the in-browser kernel:

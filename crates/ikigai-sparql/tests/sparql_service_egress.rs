@@ -7,7 +7,7 @@
 //! across a host's whole graph, and rudof_rdf turns on `oxigraph/http-client` natively, so in
 //! every host that links ikigai-shacl (ikigai-cli, ikigai-web-demo's server) oxigraph's
 //! `SparqlEvaluator` installs its default HTTP service handler and `LOAD` gets an HTTP client.
-//! Then a query string makes an outbound request that never passes through `urn:httpGet`, and no
+//! Then a query string makes an outbound request that never passes through `urn:http:get`, and no
 //! `urn:cap:net:*` is consulted. It held: the two `oxigraph_alone_*` tests below are that
 //! reproduction, and they still pass, because they use oxigraph without this crate.
 //!

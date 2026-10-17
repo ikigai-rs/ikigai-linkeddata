@@ -2,7 +2,7 @@
 //!
 //! `urn:sparql:select` / `:ask` / `:describe` / `:construct` run a `query=<sparql>` over
 //! one or more `graph=<uri>` **sources resolved through the kernel** — a graph can be any
-//! resolvable resource (a remote document via `urn:httpGet`, a file, a store's named
+//! resolvable resource (a remote document via `urn:http:get`, a file, a store's named
 //! graph). Federation is just listing graphs: `graph=` takes a comma/space-separated list,
 //! each loaded as a named graph (named by its URI) with the query's default graph set to
 //! their union — so simple queries span all of them and `GRAPH <uri> { … }` addresses one.
@@ -617,7 +617,7 @@ impl Endpoint for SparqlEndpoint {
 ///
 /// ⚠ **`LOAD <url>` and `SERVICE` are refused**, and that is a capability property, not an
 /// oversight. Either fetch would be oxigraph's own, which never passes through
-/// `urn:httpGet`, so it is invisible to the kernel and ungated by `urn:cap:net:*`: it would
+/// `urn:http:get`, so it is invisible to the kernel and ungated by `urn:cap:net:*`: it would
 /// silently upgrade [`CAP_UPDATE`] into "arbitrary outbound HTTP from inside the store", a
 /// much larger grant than the scope's name claims. This crate's own build has no HTTP client,
 /// but a HOST's build can (Cargo unifies `oxigraph/http-client` in from rudof, ledger #1083),
@@ -625,7 +625,7 @@ impl Endpoint for SparqlEndpoint {
 /// transaction opens, and a `LOAD` or `SERVICE` anywhere is an `InvalidArgument` naming the
 /// argument, with nothing applied (see the private `egress` module). The ikigai way to pull a
 /// remote graph in is to resolve it through the kernel, where the net capability applies:
-/// `urn:httpGet` on the query side, or a host that sources the document and sinks an
+/// `urn:http:get` on the query side, or a host that sources the document and sinks an
 /// `INSERT DATA` built from it.
 ///
 /// The result is uncacheable (a Sink's result is never cached anyway) and the kernel
@@ -829,16 +829,40 @@ fn check_source(uri: &str, format: RdfFormat, bytes: &[u8]) -> Result<()> {
 // this crate compiles, so lowering one below the other fails the build rather than a host.
 const _: () = assert!(limits::STACK_BASE >= ikigai_rdf::JSON_LD_STACK);
 
+/// The HTTP module's GET, by the name ikigai-http 0.2.0 gave it (ledger #11).
+const HTTP_GET: &str = "urn:http:get";
+
+/// The name ikigai-http 0.1.x binds GET at. 0.2.x keeps it as a deprecated alias of
+/// [`HTTP_GET`] until 0.3.0. This crate has no Cargo edge to ikigai-http, so nothing stops a
+/// host on 0.1.x from taking this release: [`resolve_graph`] asks for [`HTTP_GET`] and comes
+/// here only when the kernel says that name is not bound at all. Remove it once no supported
+/// host binds ikigai-http below 0.2.0.
+const HTTP_GET_BEFORE_0_2: &str = "urn:httpGet";
+
 /// Resolve a graph source through the kernel. An `http(s)://` URL is fetched via the
-/// HTTP module (`urn:httpGet`) — a bare URL isn't itself a bound resource — while a
-/// `urn:`/`file:` graph resolves directly. Either way the kernel records the source's
-/// golden thread, so the query result is cacheable and invalidates when the graph changes.
+/// HTTP module ([`HTTP_GET`], or [`HTTP_GET_BEFORE_0_2`] on a host that binds only that) —
+/// a bare URL isn't itself a bound resource — while a `urn:`/`file:` graph resolves directly.
+/// Either way the kernel records the source's golden thread, so the query result is cacheable
+/// and invalidates when the graph changes.
+///
+/// Only [`Error::Unresolved`] for [`HTTP_GET`] itself falls back: a refused capability, a
+/// failed fetch or anything else from a bound GET is the answer. A host that binds neither
+/// name gets the error for [`HTTP_GET`], the name to bind.
 async fn resolve_graph(inv: &Invocation<'_>, uri: &str) -> Result<Representation> {
     if uri.starts_with("http://") || uri.starts_with("https://") {
-        let get = Iri::parse("urn:httpGet").expect("urn:httpGet is a valid IRI");
-        let request = Request::new(Verb::Source, get)
-            .with_arg("url", ArgRef::Inline(uri.as_bytes().to_vec()));
-        inv.issue(request).await
+        let get = |name: &str| {
+            let iri = Iri::parse(name).expect("the HTTP GET names are valid IRIs");
+            Request::new(Verb::Source, iri).with_arg("url", ArgRef::Inline(uri.as_bytes().to_vec()))
+        };
+        match inv.issue(get(HTTP_GET)).await {
+            Err(Error::Unresolved(iri)) if iri.as_str() == HTTP_GET => {
+                match inv.issue(get(HTTP_GET_BEFORE_0_2)).await {
+                    Err(Error::Unresolved(_)) => Err(Error::Unresolved(iri)),
+                    answer => answer,
+                }
+            }
+            answer => answer,
+        }
     } else {
         let iri =
             Iri::parse(uri).map_err(|e| Error::Endpoint(format!("bad graph IRI `{uri}`: {e}")))?;

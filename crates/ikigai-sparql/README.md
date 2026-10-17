@@ -5,7 +5,7 @@ resolution kernel. It binds the four SPARQL verbs as resources — `urn:sparql:s
 `urn:sparql:ask`, `urn:sparql:construct`, `urn:sparql:describe` — that run a `query=` over
 one or more `graph=` sources **resolved through the kernel**.
 
-A graph can be any resolvable resource: a remote document via `urn:httpGet`, a file, a
+A graph can be any resolvable resource: a remote document via `urn:http:get`, a file, a
 store's named graph. Federation is just listing graphs — `graph=` takes a comma- or
 space-separated list, each loaded as a named graph (named by its URI) with the query's
 default graph set to their union, so simple queries span every source and
@@ -191,7 +191,7 @@ cuts the same thread on any change.
 The result is `.cacheable()` and — because each graph is resolved with `inv.source` — it
 depends on every source's **golden thread**. Re-running the same query is a cache hit, and
 a change to any underlying graph auto-invalidates the cached result. An `http(s)://` graph
-is fetched via `urn:httpGet`, so its own cache policy propagates into the query result;
+is fetched via `urn:http:get`, so its own cache policy propagates into the query result;
 `urn:`/`file:` graphs resolve directly.
 
 Cacheable also means **the same bytes when it is recomputed** (ledger #1566). Each query runs
@@ -211,7 +211,7 @@ store's hashed graph map. The shared-store variant is uncacheable and streams as
 
 **`SERVICE` and `LOAD` are refused on every door, before evaluation** (ledger #1083). Both
 would make oxigraph fetch over HTTP with its own client, a request that never passes through
-`urn:httpGet`, so the kernel never sees it and no `urn:cap:net:*` is consulted: a SPARQL door
+`urn:http:get`, so the kernel never sees it and no `urn:cap:net:*` is consulted: a SPARQL door
 would be arbitrary outbound HTTP from inside a query string.
 
 This crate's own build has no HTTP client, but that is not enough: Cargo unifies features
