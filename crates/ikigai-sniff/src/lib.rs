@@ -323,7 +323,7 @@ pub fn space() -> EndpointSpace {
                     .input(
                         ArgSpec::new("content")
                             .summary(
-                                "the bytes to classify — usually piped in (e.g. from urn:httpGet \
+                                "the bytes to classify — usually piped in (e.g. from urn:http:get \
                                  or a file)",
                             )
                             .class(XSD_STRING),
@@ -390,7 +390,7 @@ impl Endpoint for AutoTransrept {
             .input(
                 ArgSpec::new("content")
                     .summary(
-                        "the bytes to transrept — usually piped in (e.g. from urn:httpGet or a \
+                        "the bytes to transrept — usually piped in (e.g. from urn:http:get or a \
                          file)",
                     )
                     .class(XSD_STRING),

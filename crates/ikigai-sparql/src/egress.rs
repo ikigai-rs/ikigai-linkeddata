@@ -2,7 +2,7 @@
 //!
 //! Two parts of SPARQL fetch over HTTP inside oxigraph: `SERVICE <iri> { … }` (federated
 //! query, in a query or in an update's `WHERE`) and `LOAD <iri>` (an update operation). That
-//! fetch is oxigraph's own. It never passes through `urn:httpGet`, so the kernel never sees it
+//! fetch is oxigraph's own. It never passes through `urn:http:get`, so the kernel never sees it
 //! and no `urn:cap:net:*` is consulted: a caller holding only a SPARQL door would get arbitrary
 //! outbound HTTP from inside a query string.
 //!
@@ -75,7 +75,7 @@ pub(crate) fn check_update(update: &Update, arg: &str) -> Result<()> {
                          before evaluation: the fetch would be oxigraph's own HTTP request, made \
                          outside the kernel where no urn:cap:net:* is consulted (ledger #1083). \
                          No grant changes this. Pull the document in through the kernel instead \
-                         (urn:httpGet, which urn:cap:net:* gates) and sink an INSERT DATA built \
+                         (urn:http:get, which urn:cap:net:* gates) and sink an INSERT DATA built \
                          from it. Nothing was applied"
                     ),
                 });

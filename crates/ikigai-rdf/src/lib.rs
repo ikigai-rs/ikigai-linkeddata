@@ -11,7 +11,7 @@
 //! `wasm32` and the browser can transrept a fetched graph **client-side**:
 //!
 //! ```text
-//! source urn:httpGet url=https://example.org/thing | urn:rdf:transrept as=text/turtle
+//! source urn:http:get url=https://example.org/thing | urn:rdf:transrept as=text/turtle
 //! ```
 //!
 //! The kernel pipes the fetched bytes into `content`; `as` picks the representation.
@@ -291,7 +291,7 @@ pub fn space() -> EndpointSpace {
                             ArgSpec::new("content")
                                 .summary(
                                     "the RDF document to transrept — usually piped in (e.g. from \
-                                 urn:httpGet)",
+                                 urn:http:get)",
                                 )
                                 .class(XSD_STRING),
                         )

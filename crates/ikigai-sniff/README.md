@@ -16,7 +16,7 @@ it runs natively and in the browser (`wasm32`) alike.
 
 | Resource | Arg | Meaning |
 | --- | --- | --- |
-| `urn:sniff` | `content` | the bytes to classify — usually piped in (e.g. from `urn:httpGet` or a file) |
+| `urn:sniff` | `content` | the bytes to classify — usually piped in (e.g. from `urn:http:get` or a file) |
 | `urn:transrept:auto` | `content` | the bytes to transrept, input type unknown |
 | | `as` | target media type (default `text/turtle`) |
 
@@ -31,10 +31,10 @@ them it is a clean error naming the sniffed type, never a mis-parse.
 
 ```shell
 # What did that server actually send?
-source urn:httpGet url=https://example.org/thing | urn:sniff
+source urn:http:get url=https://example.org/thing | urn:sniff
 
 # Convert it to Turtle without asserting what it was:
-source urn:httpGet url=https://example.org/thing | urn:transrept:auto as=text/turtle
+source urn:http:get url=https://example.org/thing | urn:transrept:auto as=text/turtle
 ```
 
 ## What it detects

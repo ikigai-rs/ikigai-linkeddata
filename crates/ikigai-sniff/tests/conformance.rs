@@ -26,7 +26,7 @@
 //! precedent for that shape is a per-check waiver. It is **not** used here, and the
 //! difference is worth stating because it is easy to copy the wrong half:
 //!
-//! - `urn:httpGet` serves the *origin's* `Content-Type`. There is no face it picks
+//! - `urn:http:get` serves the *origin's* `Content-Type`. There is no face it picks
 //!   for itself, so no declaration can be true and the waiver is the only honest move.
 //! - `urn:transrept:auto` picks one: `inline_str("as").unwrap_or(TURTLE)`, matching
 //!   the `as` ArgSpec's `default_value`. The walk's minimal call supplies no `as`
