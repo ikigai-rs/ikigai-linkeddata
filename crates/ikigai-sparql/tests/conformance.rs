@@ -102,10 +102,11 @@ fn assert_shape(report: &Report, endpoints: usize) {
         report.actions, endpoints,
         "one action per endpoint (Source, or Sink for update): {report}"
     );
+    // Exactly one skip: FAILURES, off unless a suite opts in (`check_failures()`, the next wave).
     assert_eq!(
         report.checks.skipped().count(),
-        0,
-        "every check runs: {report}"
+        1,
+        "every check runs but FAILURES: {report}"
     );
 }
 
