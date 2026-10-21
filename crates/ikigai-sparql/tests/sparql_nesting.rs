@@ -151,11 +151,22 @@ fn issue_text(kernel: &Kernel, door: &str, text: String) -> ikigai_core::Result<
         Request::new(Verb::Sink, Iri::parse("urn:sparql:update").unwrap())
             .with_arg("content", ArgRef::Inline(text.into_bytes()))
     } else {
-        Request::new(
+        let req = Request::new(
             Verb::Source,
             Iri::parse(format!("urn:sparql:{form}")).unwrap(),
         )
-        .with_arg("query", ArgRef::Inline(text.into_bytes()))
+        .with_arg("query", ArgRef::Inline(text.into_bytes()));
+        // The kernel fills a declared default before dispatch, so the construct and describe
+        // doors see `as=text/turtle` even when the caller gave none, and refuse the SELECT
+        // these probes send. Name a results syntax there: the probes are about nesting, not `as`.
+        if matches!(form, "construct" | "describe") {
+            req.with_arg(
+                "as",
+                ArgRef::Inline(b"application/sparql-results+json".to_vec()),
+            )
+        } else {
+            req
+        }
     };
     block_on(kernel.issue(req, &Capability::root()))
         .map(|rep| String::from_utf8_lossy(&rep.bytes).into_owned())
