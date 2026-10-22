@@ -1,3 +1,5 @@
+#![cfg(feature = "transrept")]
+
 //! The module recipe as one test: `ikigai-conformance` walks the three endpoints
 //! [`ikigai_rdf::space`] binds and reports every violation at once.
 //!

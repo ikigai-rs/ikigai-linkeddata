@@ -11,6 +11,28 @@ Oxigraph's **pure** parser/serializer crates ([`oxrdfio`](https://crates.io/crat
 0.2 / [`oxrdf`](https://crates.io/crates/oxrdf) 0.3) — no store, no rocksdb — so it
 compiles to `wasm32` and the browser can transrept a fetched graph **client-side**.
 
+## Features
+
+The default `transrept` feature provides `space()` and `SPACE_ID`, with all existing
+input/output syntaxes. It enables optional `oxrdfio` and the `rdfxml` scan feature.
+Upstream oxrdfio 0.2 has no per-format switches, so full transreption still includes
+all its parsers.
+
+For Turtle parsing helpers, canonicalization and Turtle/JSON depth checks only:
+
+```toml
+ikigai-rdf = { version = "0.2.7", default-features = false }
+```
+
+`subclass_axioms` parses directly with `oxttl`. The depth checks themselves do not
+parse RDF. This configuration includes no oxrdfio, oxjsonld, oxrdfxml or quick-xml.
+Add `features = ["rdfxml"]` for `check_rdfxml_nesting` and quick-xml alone.
+`rdf-12` enables triple-term handling in oxrdf/oxttl and forwards to oxrdfio only
+when transreption is enabled; it does not activate the full format graph.
+Cargo features are additive: another dependency enabling `transrept` restores that
+graph. See [the standalone wasm consumer](tests/wasm-consumer/README.md) for the
+regression check and before/after measurement.
+
 ## Endpoint
 
 | Resource | Arg | Meaning |

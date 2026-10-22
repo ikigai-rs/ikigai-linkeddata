@@ -1,0 +1,24 @@
+[package]
+name = "rdf-depth-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ikigai-rdf = { path = "../..", default-features = false }
+
+[features]
+full = ["ikigai-rdf/transrept"]
+rdfxml = ["ikigai-rdf/rdfxml"]
+rdf-12 = ["ikigai-rdf/rdf-12"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"
+strip = true
