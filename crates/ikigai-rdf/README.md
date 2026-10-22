@@ -64,8 +64,12 @@ the RDF library copies a nested triple term recursively, and a stack overflow ab
 host. So every door here reads caller RDF for triple-term depth before parsing it, and
 refuses past `MAX_TURTLE_NESTING` (64) as an `InvalidArgument` naming the argument that
 carried it (`content` or `with`): `<<` nesting in Turtle, N-Triples, N-Quads and TriG,
-nested `rdf:parseType` elements in RDF/XML. The scans are exported as
-`check_turtle_nesting` and `check_rdfxml_nesting`.
+nested `rdf:parseType` elements in RDF/XML (all but `Resource`, `Literal` and `Collection`,
+which never build a triple term). The scans are exported as `check_turtle_nesting` and
+`check_rdfxml_nesting`. N-Triples and N-Quads are read with Turtle's lexer, which is safe for a
+caller that stops at the parser's first error, as every door here does: oxttl resumes at the
+next line after an error, so a caller that reads on past one needs a scan of its own. RDF/XML
+must be UTF-8, as oxrdfxml requires; a UTF-16 document fails in the parser at its first element.
 
 JSON-LD has no triple terms, but its expander recurses once per nested node object (a debug
 build aborted at 29 levels on a 2 MiB thread, a release one at about 1,000), and re-reads a
@@ -76,8 +80,8 @@ build answers what a release one does. On wasm the parse runs inline and the bou
 applies. The scan is exported as `check_json_nesting`.
 
 Nothing else these syntaxes nest recurses, so nothing else is bounded: blank-node property
-lists, collections and RDF 1.2 annotation blocks in Turtle, and striped element nesting and XML
-literals in RDF/XML, are each answered at every door 32,000 levels deep (8,000 for RDF/XML)
+lists, collections and RDF 1.2 annotation blocks in Turtle, and striped element nesting, XML
+literals and `rdf:parseType="Resource"` in RDF/XML, are each answered at every door 32,000 levels deep (8,000 for RDF/XML)
 on a 2 MiB thread in a debug build (`tests/structural_depth.rs`, ledger #1326). ⚠ That
 is about the stack, not time: oxrdfxml walks its whole stack of open elements once per element,
 so striped RDF/XML costs the square of its depth (8,000 levels, 330 KB, in 1.8 s of a debug

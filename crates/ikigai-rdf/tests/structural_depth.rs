@@ -13,9 +13,10 @@
 //!   property lists `[ ex:p [ ex:p … ] ]`, collections `( ( ( … ) ) )`, and RDF 1.2 annotation
 //!   blocks `{| ex:q ex:r {| … |} |}`. oxttl 0.2 parses with an explicit stack of states, and
 //!   each of these builds blank nodes, never a nested term, so nothing recurses.
-//! - RDF/XML: plain striped element nesting (`<ex:p><rdf:Description><ex:p>…`), and an XML
-//!   literal (`rdf:parseType="Literal"`) holding deeply nested elements. oxrdfxml 0.2 keeps
-//!   its open elements on a `Vec`, and copies a literal's markup as text.
+//! - RDF/XML: plain striped element nesting (`<ex:p><rdf:Description><ex:p>…`), an XML
+//!   literal (`rdf:parseType="Literal"`) holding deeply nested elements, and nested
+//!   `rdf:parseType="Resource"` property elements. oxrdfxml 0.2 keeps its open elements on a
+//!   `Vec`, copies a literal's markup as text, and opens each `Resource` on a fresh blank node.
 //!
 //! Each probe runs in a CHILD PROCESS (this test binary re-executed with one probe named in its
 //! environment) on a 2 MiB thread, so an abort kills the child and reads here as a failure with
@@ -86,12 +87,22 @@ fn document(syntax: &str, levels: usize) -> String {
             "<ex:a>".repeat(levels),
             "</ex:a>".repeat(levels)
         ),
+        // `rdf:parseType="Resource"` nested: each level a fresh blank node, never a triple term
+        // (ledger #2056: the depth scan used to count these, and refused this past 64).
+        "rdfxml-resource" => format!(
+            "<?xml version=\"1.0\"?>\n<rdf:RDF \
+             xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns:ex=\"urn:ex:\">\
+             <rdf:Description rdf:about=\"urn:ex:s\">{}<ex:p rdf:resource=\"urn:ex:o\"/>{}\
+             </rdf:Description></rdf:RDF>\n",
+            "<ex:p rdf:parseType=\"Resource\">".repeat(levels),
+            "</ex:p>".repeat(levels)
+        ),
         other => panic!("no syntax named {other}"),
     }
 }
 
 const TURTLE: [&str; 3] = ["bnode", "collection", "annotation"];
-const RDFXML: [&str; 2] = ["rdfxml-striped", "rdfxml-literal"];
+const RDFXML: [&str; 3] = ["rdfxml-striped", "rdfxml-literal", "rdfxml-resource"];
 
 /// The rdf space, sniff's space, and `urn:test:deep`, a resource whose body is the deep
 /// document, so `with=` can name it and have the kernel resolve it.
@@ -304,6 +315,8 @@ fn every_shape_parses_at_a_small_depth() {
             // per level ex:p to a blank node, then the innermost ex:p ex:o
             "rdfxml-striped" => 4,
             "rdfxml-literal" => 1,
+            // the same graph as striped nesting, each blank node opened by the property
+            "rdfxml-resource" => 4,
             other => panic!("no syntax named {other}"),
         };
         assert_eq!(triples, expected, "{syntax}: {nt}");
