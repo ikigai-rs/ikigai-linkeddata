@@ -1,3 +1,5 @@
+#![cfg(feature = "transrept")]
+
 //! Where ikigai-rdf's nesting scans read caller RDF differently from ikigai-store's own copy,
 //! which reading is right, decided by reproduction (ledger #2056, from ikigai-rs/ikigai-store
 //! PR 68, which switched the store to these scans and failed five of its tests).

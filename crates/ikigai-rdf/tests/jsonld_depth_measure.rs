@@ -1,3 +1,5 @@
+#![cfg(feature = "transrept")]
+
 //! The measurement behind `src/depth.rs`'s JSON bound (ledger #1038), kept so it can be re-run
 //! when oxjsonld moves: how deep each JSON-LD shape goes before the process aborts, on a thread
 //! of a given size, through the parser alone (`DOORS=parse`, oxrdfio directly, BENEATH this

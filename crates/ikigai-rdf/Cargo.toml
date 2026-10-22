@@ -13,15 +13,22 @@ categories = ["web-programming", "parser-implementations"]
 [dependencies]
 async-trait = "0.1"
 ikigai-core = { workspace = true }
-oxrdfio = { workspace = true }
+oxrdfio = { workspace = true, optional = true }
 oxrdf = { workspace = true }
 # The XML reader oxrdfxml parses with, run over caller RDF/XML first to bound triple-term depth
 # (ledger #992, `src/depth.rs`): the scan IS the parser's lexer rather than a hand mirror of it.
 # "0.37" because oxrdfxml 0.2.4 (oxrdfio 0.2.6) asks for exactly that line, so the two resolve to
 # ONE copy; when oxrdfio's floor moves, move this with oxrdfxml's quick-xml line.
-quick-xml = "0.37"
+quick-xml = { version = "0.37", optional = true }
+oxttl = "0.2"
 
 [features]
+# Preserve the full endpoint API by default. Scan-only/Turtle consumers opt out.
+default = ["transrept"]
+# oxrdfio 0.2 bundles every syntax; none is needed by the standalone depth scans.
+transrept = ["dep:oxrdfio", "rdfxml"]
+# XML scanning can also be used without the full transreption parser graph.
+rdfxml = ["dep:quick-xml"]
 # RDF 1.2: the parsers accept triple terms (`<<( … )>>`), and `BlankNodeLabels` and
 # `canonical_triples` relabel the blank nodes INSIDE them (ledger #1575). Without it this crate
 # cannot name oxrdf's triple-term variant, which exists only under `oxrdf/rdf-12`, so a blank node
@@ -30,7 +37,7 @@ quick-xml = "0.37"
 # terms without the relabeling. A host that parses RDF 1.2 turns THIS feature on.
 # ⚠ A build with `ikigai-sparql` in it turns on `ikigai-sparql/rdf-12` instead: an rdf-12 oxrdf
 # does not compile spargebra unless oxigraph's `rdf-12` is on too.
-rdf-12 = ["oxrdf/rdf-12", "oxrdfio/rdf-12"]
+rdf-12 = ["oxrdf/rdf-12", "oxttl/rdf-12", "oxrdfio?/rdf-12"]
 
 # oxrdf/oxrdfio depend on getrandom; on wasm its JS backend must be enabled (paired
 # with the `getrandom_backend` cfg in .cargo/config.toml). Not used directly.

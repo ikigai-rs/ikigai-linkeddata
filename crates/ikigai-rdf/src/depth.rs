@@ -59,7 +59,9 @@
 //! element, so 8,000 levels take 1.8 s in a debug build.
 
 use ikigai_core::{Error, Result};
+#[cfg(feature = "rdfxml")]
 use quick_xml::events::Event;
+#[cfg(feature = "rdfxml")]
 use quick_xml::NsReader;
 
 // COPY: `MAX_TURTLE_NESTING` and `check_turtle_nesting` are ikigai-shacl's (`src/depth.rs`,
@@ -163,6 +165,7 @@ pub fn check_json_nesting(bytes: &[u8], arg: &str) -> Result<()> {
 /// that cannot be spawned is a transient [`Error::Unavailable`], never a fallback to running
 /// inline, which is the overflow this exists to prevent. On wasm there are no threads, and
 /// `work` runs inline.
+#[cfg(feature = "transrept")]
 pub(crate) fn on_json_ld_stack<T, F>(work: F) -> Result<T>
 where
     T: Send,
@@ -348,6 +351,7 @@ pub fn check_turtle_nesting(text: &str, arg: &str) -> Result<()> {
 /// element and builds nothing, whether or not quick-xml's `encoding` feature is on in the build
 /// (`tests/nesting_reconcile.rs`, ledger #2056). A host that DECODES caller XML before handing it
 /// to oxrdfxml scans the decoded text, not the bytes it received.
+#[cfg(feature = "rdfxml")]
 pub fn check_rdfxml_nesting(bytes: &[u8], arg: &str) -> Result<()> {
     let mut reader = NsReader::from_reader(bytes);
     reader.config_mut().expand_empty_elements = true;
@@ -398,6 +402,7 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "rdfxml")]
     fn rdfxml(levels: usize, parse_type: &str) -> String {
         format!(
             "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" \
@@ -433,6 +438,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "rdfxml")]
     fn rdfxml_at_the_bound_passes_and_one_past_is_refused_by_name() {
         check_rdfxml_nesting(rdfxml(64, "Triple").as_bytes(), "content").unwrap();
         let err = check_rdfxml_nesting(rdfxml(65, "Triple").as_bytes(), "content").unwrap_err();
@@ -443,6 +449,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "rdfxml")]
     fn rdfxml_counts_a_parse_type_however_it_is_spelled() {
         // `&#84;riple` is `Triple` once the parser unescapes it, so the value is not read.
         let spelled = rdfxml(65, "&#84;riple");
@@ -454,6 +461,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "rdfxml")]
     fn rdfxml_resource_literal_and_collection_are_not_counted() {
         // ikigai-store's case (ledger #2056): 200 nested `Resource` elements build blank nodes.
         for parse_type in ["Resource", "Literal", "Collection"] {
@@ -463,6 +471,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "rdfxml")]
     fn rdfxml_triples_between_resources_still_count() {
         // A triple term nests as deep as the `Triple` elements around it, whatever is between.
         let mixed = |levels: usize| {
@@ -493,6 +502,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "rdfxml")]
     fn rdfxml_markup_in_comments_and_cdata_is_not_nesting() {
         let fake = rdfxml(1, "Triple").replace(
             "<ex:p rdf:resource",
@@ -506,6 +516,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "rdfxml")]
     fn rdfxml_siblings_are_not_nesting() {
         let flat = format!(
             "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" \

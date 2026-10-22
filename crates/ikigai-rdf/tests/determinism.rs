@@ -1,3 +1,5 @@
+#![cfg(feature = "transrept")]
+
 //! Every cacheable face here answers the same bytes for the same request, on every fresh
 //! kernel (ledger #1566).
 //!

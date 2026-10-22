@@ -1,3 +1,5 @@
+#![cfg(feature = "transrept")]
+
 //! A blank node inside an RDF 1.2 triple term gets the same label on every fresh kernel
 //! (ledger #1575).
 //!

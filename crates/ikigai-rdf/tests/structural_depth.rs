@@ -1,3 +1,5 @@
+#![cfg(feature = "transrept")]
+
 //! Nesting that is NOT a triple term and NOT JSON-LD does not abort a door (ledger #1326).
 //!
 //! The claim (ledger #1326, from ikigai-rs/ikigai-layers PR 10): a door runs requests on a

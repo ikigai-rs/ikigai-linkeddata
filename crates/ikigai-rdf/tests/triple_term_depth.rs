@@ -1,3 +1,5 @@
+#![cfg(feature = "transrept")]
+
 //! Caller RDF that nests RDF 1.2 triple terms deeply is refused before it is parsed, at every
 //! door that parses it (ledger #992, the linkeddata half; ikigai-shacl's PR 17 was the first).
 //!
