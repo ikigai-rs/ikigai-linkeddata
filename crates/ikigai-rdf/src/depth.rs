@@ -53,7 +53,8 @@
 //! Swept at every door on a 2 MiB thread in a debug build (`tests/structural_depth.rs`):
 //! Turtle blank-node property lists, collections and RDF 1.2 annotation blocks (32,000 levels;
 //! oxttl parses with an explicit stack and they build only blank nodes), and RDF/XML striped
-//! element nesting and XML literals (8,000; oxrdfxml keeps its open elements on a `Vec`). ⚠ Striped RDF/XML is QUADRATIC in time, though: oxrdfxml walks the whole element
+//! element nesting, XML literals and `rdf:parseType="Resource"` (8,000; oxrdfxml keeps its open
+//! elements on a `Vec`). ⚠ Striped RDF/XML is QUADRATIC in time, though: oxrdfxml walks the whole element
 //! stack for an inherited `xml:lang`, base direction, `rdf:version` and base IRI on each
 //! element, so 8,000 levels take 1.8 s in a debug build.
 
@@ -220,6 +221,24 @@ fn too_deep(arg: &str, how: &str) -> Error {
 /// and nothing after that point is ever built into a term. Over-reading is the safe direction
 /// (a `<<` inside an IRI the strict parser would reject is counted); hiding one the parser
 /// reads would not be, and the strict lexer never reads past a place this scan treats as text.
+///
+/// # N-Triples and N-Quads (ledger #2056)
+///
+/// oxttl reads those two with its N-Triples lexer mode, where `'` opens no string and `"""` is
+/// an empty string and then another, and this scan reads them as Turtle anyway. That is safe on
+/// the same terms: every place the readings part (a `'`, a `"""`, a `\` outside a string) is a
+/// syntax error to the N-Triples parser AT that place, before anything the Turtle reading hides
+/// behind it. So `<urn:a> <urn:q> 'x . <urn:a> <urn:p> <<( … )>> . # '`, 30,000 levels deep, is
+/// admitted here and stopped by the parser at the `'` (`tests/nesting_reconcile.rs`).
+///
+/// ⚠ **The caller's half of that contract: stop at the parser's FIRST error.** oxttl's
+/// N-Triples parser does not stop by itself: after an error it RESUMES at the next line
+/// (`RecoverToLineJump`), so a consumer that skips errors and reads on (`filter_map(Result::ok)`,
+/// or a loader told to ignore parse errors) builds the statement on the next line that this
+/// scan read as part of a string, and a deep enough one aborts the host (measured, same test).
+/// Every door in this crate and in ikigai-sparql stops at the first error (`?` in the loop), as
+/// oxigraph's `Store::load_from_reader` does. A caller that must read past errors needs a scan
+/// in the parser's own lexer mode, which this crate does not offer.
 pub fn check_turtle_nesting(text: &str, arg: &str) -> Result<()> {
     let b = text.as_bytes();
     let at = |i: usize| b.get(i).copied();
@@ -311,10 +330,24 @@ pub fn check_turtle_nesting(text: &str, arg: &str) -> Result<()> {
 /// parser does (and the door with it).
 ///
 /// It counts MORE than the parser builds, which is the safe direction: any element with an
-/// attribute whose local name is `parseType`, whatever its prefix or value (a value can be
-/// spelled with character or entity references), and an element whose attributes do not parse.
-/// Real RDF/XML nests `parseType` elements a few deep; one 65 deep is refused even when it is
-/// `Resource`, which never recursed.
+/// attribute whose local name is `parseType`, whatever its prefix, unless its value is written
+/// out, byte for byte, as `Resource`, `Literal` or `Collection`; and an element whose attributes
+/// do not parse. A value spelled any other way is counted, since a character or entity
+/// reference (`&#84;riple`, or an entity declared in the DOCTYPE, which oxrdfxml expands) can
+/// spell `Triple`.
+///
+/// Those three are not counted because none of them makes a triple term deeper (ledger #2056,
+/// read from oxrdfxml 0.2.4's `parser.rs` and measured by `tests/structural_depth.rs`, 8,000
+/// levels on a 2 MiB thread in a debug build). `Resource` opens a node on a fresh blank node,
+/// held on the parser's `Vec` of states; `Literal` copies its content as text; `Collection`
+/// builds list nodes. A triple term nests only as deep as the `Triple` elements around it,
+/// whatever sits between them, and those are all still counted.
+///
+/// ⚠ The input must be UTF-8, which is all oxrdfxml reads, and it is not refused here when it is
+/// not: a UTF-16 document (with or without a byte order mark) fails in the parser at its first
+/// element and builds nothing, whether or not quick-xml's `encoding` feature is on in the build
+/// (`tests/nesting_reconcile.rs`, ledger #2056). A host that DECODES caller XML before handing it
+/// to oxrdfxml scans the decoded text, not the bytes it received.
 pub fn check_rdfxml_nesting(bytes: &[u8], arg: &str) -> Result<()> {
     let mut reader = NsReader::from_reader(bytes);
     reader.config_mut().expand_empty_elements = true;
@@ -325,7 +358,13 @@ pub fn check_rdfxml_nesting(bytes: &[u8], arg: &str) -> Result<()> {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
                 let counts = element.attributes().any(|attribute| match attribute {
-                    Ok(attribute) => attribute.key.local_name().as_ref() == b"parseType",
+                    Ok(attribute) => {
+                        attribute.key.local_name().as_ref() == b"parseType"
+                            && !matches!(
+                                attribute.value.as_ref(),
+                                b"Resource" | b"Literal" | b"Collection"
+                            )
+                    }
                     Err(_) => true,
                 });
                 if counts {
@@ -412,6 +451,45 @@ mod tests {
             .replace("xmlns:rdf=", "xmlns:r=")
             .replace("rdf:", "r:");
         assert!(check_rdfxml_nesting(other_prefix.as_bytes(), "content").is_err());
+    }
+
+    #[test]
+    fn rdfxml_resource_literal_and_collection_are_not_counted() {
+        // ikigai-store's case (ledger #2056): 200 nested `Resource` elements build blank nodes.
+        for parse_type in ["Resource", "Literal", "Collection"] {
+            check_rdfxml_nesting(rdfxml(200, parse_type).as_bytes(), "content")
+                .unwrap_or_else(|e| panic!("{parse_type}: {e}"));
+        }
+    }
+
+    #[test]
+    fn rdfxml_triples_between_resources_still_count() {
+        // A triple term nests as deep as the `Triple` elements around it, whatever is between.
+        let mixed = |levels: usize| {
+            format!(
+                "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" \
+                 xmlns:ex=\"urn:ex:\"><rdf:Description rdf:about=\"urn:ex:s\">{}\
+                 <ex:p rdf:resource=\"urn:ex:o\"/>{}</rdf:Description></rdf:RDF>",
+                "<ex:p rdf:parseType=\"Triple\"><rdf:Description rdf:about=\"urn:ex:s\">\
+                 <ex:r rdf:parseType=\"Resource\">"
+                    .repeat(levels),
+                "</ex:r></rdf:Description></ex:p>".repeat(levels)
+            )
+        };
+        check_rdfxml_nesting(mixed(64).as_bytes(), "content").unwrap();
+        assert!(check_rdfxml_nesting(mixed(65).as_bytes(), "content").is_err());
+        // A value that is not one of the three, written out, is counted: a reference can
+        // spell `Triple`, and whitespace makes it another value.
+        for spelled in ["&#82;esource", " Resource", "resource"] {
+            let err = check_rdfxml_nesting(rdfxml(65, spelled).as_bytes(), "content");
+            assert!(err.is_err(), "{spelled}");
+        }
+        // Any `parseType` attribute that is not one of the three counts, even beside one that is.
+        let both = rdfxml(65, "Triple").replace(
+            "rdf:parseType=\"Triple\"",
+            "rdf:parseType=\"Resource\" ex:parseType=\"Triple\"",
+        );
+        assert!(check_rdfxml_nesting(both.as_bytes(), "content").is_err());
     }
 
     #[test]

@@ -47,6 +47,21 @@ fn document(syntax: &str, levels: usize) -> (&'static str, String) {
             "application/n-quads",
             format!("<urn:ex:s> <urn:ex:p> {nested} <urn:ex:g> .\n"),
         ),
+        // Ledger #2056: a `'` that opens a string to the depth scan, which reads N-Triples and
+        // N-Quads with Turtle's lexer, and is a syntax error to the N-Triples parser; the deep
+        // term on the next line, where that parser resumes after an error. Admitted by the scan,
+        // and stopped by the load at its first error, before the term is built.
+        "ntriples-hidden" => (
+            "application/n-triples",
+            format!("<urn:ex:s> <urn:ex:q> 'x .\n<urn:ex:s> <urn:ex:p> {nested} . # '\n"),
+        ),
+        "nquads-hidden" => (
+            "application/n-quads",
+            format!(
+                "<urn:ex:s> <urn:ex:q> 'x <urn:ex:g> .\n\
+                 <urn:ex:s> <urn:ex:p> {nested} <urn:ex:g> . # '\n"
+            ),
+        ),
         "trig" => (
             "application/trig",
             format!("<urn:ex:s> <urn:ex:p> {nested} .\n"),
@@ -219,6 +234,22 @@ fn three_thousand_triple_terms_are_refused_at_every_query_form_and_abort_nothing
 fn every_syntax_that_nests_triple_terms_is_refused() {
     for syntax in ["ntriples", "nquads", "trig", "sniffed-turtle", "rdfxml"] {
         assert_refused(&probe("select", syntax, 3000), "MAX_TURTLE_NESTING", syntax);
+    }
+}
+
+/// The N-Triples quoting case (ledger #2056): the scan admits it, and the load fails at the
+/// stray `'` and stops there, so nothing aborts. Were the load to read on past the error, the
+/// next line's term would be built (ikigai-rdf's `tests/nesting_reconcile.rs`).
+#[test]
+fn a_term_hidden_from_the_scan_by_a_quote_is_never_loaded() {
+    for syntax in ["ntriples-hidden", "nquads-hidden"] {
+        let outcome = probe("select", syntax, 30_000);
+        assert!(
+            outcome.starts_with("err ")
+                && outcome.contains(&format!("loading <{SOURCE}>"))
+                && !outcome.contains("invalid argument"),
+            "{syntax}: {outcome}"
+        );
     }
 }
 
