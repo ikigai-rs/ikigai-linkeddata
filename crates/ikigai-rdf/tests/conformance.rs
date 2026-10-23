@@ -30,6 +30,12 @@
 //! suite sets it per declared output, which is how all six RDF faces of the
 //! transreptor get exercised from one fixture.
 //!
+//! The transreptor's `content` and `src` are a group, exactly one of them, so REQUIRED also
+//! calls it with only `src`: with the IRI it samples for an `xsd:anyURI`,
+//! `urn:example:conformance`. [`SOURCE`] binds that IRI beside the module, serving [`BASE`],
+//! so the call is answered and the group is observed rather than left unprobed. It is the
+//! test's, not the module's, so the walk is scoped to [`ENDPOINTS`] and it is inherited.
+//!
 //! `space()` is declared self-named (SPACE-NAME): it reads nothing while it is built, so it
 //! claims `urn:iki:space:rdf`, exported as `SPACE_ID`.
 //!
@@ -37,7 +43,10 @@
 //! fixture's are defined ones), and NAMES runs: every id here is kebab-case.
 
 use ikigai_conformance::{Fixture, Suite};
-use ikigai_core::{Kernel, Verb};
+use ikigai_core::{
+    EndpointSpace, Exact, Fallback, FnEndpoint, Invocation, Kernel, ReprType, Representation,
+    Space, Verb,
+};
 use std::sync::Arc;
 
 /// The three endpoints `space()` binds, by description id.
@@ -57,22 +66,47 @@ const WITH: &str = "@prefix dcterms: <http://purl.org/dc/terms/> .\n\
 <urn:example:conformance> a <https://ikigai-rs.dev/ns#Endpoint> .\n\
 <urn:example:conformance:other> dcterms:title \"with\" .\n";
 
+/// The fixture source `src=` names: the description id of the endpoint at the IRI the suite
+/// samples for an `xsd:anyURI`.
+const SOURCE: &str = "conformance-source";
+
+/// The module's space beside [`SOURCE`], which serves [`BASE`] at `urn:example:conformance`.
+fn kernel() -> Kernel {
+    let source = EndpointSpace::new().bind(
+        Exact::new("urn:example:conformance"),
+        FnEndpoint::new(SOURCE, |_: &Invocation<'_>| {
+            Ok(
+                Representation::new(ReprType::new("text/turtle"), BASE.as_bytes().to_vec())
+                    .cacheable(),
+            )
+        }),
+    );
+    Kernel::new(Arc::new(Fallback::new(vec![
+        Arc::new(ikigai_rdf::space()) as Arc<dyn Space>,
+        Arc::new(source) as Arc<dyn Space>,
+    ])))
+}
+
 /// The suite, configured for this module (see the file docs for why each line).
 fn suite() -> Suite {
-    ENDPOINTS.iter().fold(Suite::new(), |suite, id| {
-        let fixture = Fixture::new(*id, Verb::Source).arg("content", BASE);
-        let fixture = if *id == TRANSREPT {
-            fixture
-        } else {
-            fixture.arg("with", WITH)
-        };
-        suite.fixture(fixture).pure(*id).cacheable(*id)
-    })
+    ENDPOINTS
+        .iter()
+        .fold(Suite::new(), |suite, id| {
+            let fixture = Fixture::new(*id, Verb::Source).arg("content", BASE);
+            let fixture = if *id == TRANSREPT {
+                fixture
+            } else {
+                fixture.arg("with", WITH)
+            };
+            suite.fixture(fixture).pure(*id).cacheable(*id)
+        })
+        .own_all(ENDPOINTS)
+        .inherit(SOURCE, "this test's source for src=, not the module's")
 }
 
 #[test]
 fn conforms() {
-    let kernel = Kernel::new(Arc::new(ikigai_rdf::space()));
+    let kernel = kernel();
     // SPACE-NAME: `space()` is configuration-free, so it names itself `urn:iki:space:rdf`,
     // and two calls hold the same doors under that name.
     let report = suite()

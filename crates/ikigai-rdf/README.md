@@ -38,11 +38,16 @@ regression check and before/after measurement.
 | Resource | Arg | Meaning |
 | --- | --- | --- |
 | `urn:rdf:transrept` | `content` | the RDF document to transrept — usually piped in (e.g. from `urn:http:get`) |
+| | `src` | instead of `content`: the IRI of an RDF resource to transrept, resolved through the kernel under the caller's capability (an `http(s)://` URL via `urn:http:get`) |
 | | `as` | target representation (default `text/turtle`) |
 
 The input syntax is sniffed from its opening tokens (`{`/`[` → JSON-LD; a leading
 `<scheme:…>` IRI → Turtle/N-Triples; a leading XML element → RDF/XML; otherwise Turtle),
-so an explicit input format isn't needed for the common cases. Turtle and XML both open
+so an explicit input format isn't needed for the common cases. A `src=` resource is
+sniffed the same way. Give `content` or `src`, exactly one: both together is refused as
+an `InvalidArgument`. A `src=` read is a sub-request of the transreption, so the answer is
+exactly as cacheable as the source and carries its golden threads: cutting the source's
+thread invalidates the transrepted answer too. Turtle and XML both open
 with `<`, and the IRI is recognized by its shape — it closes with no whitespace, quote or
 `<` inside it, leads with a URI scheme, and is not a bare XML QName like `<rdf:RDF>` — so
 an authority-less scheme (`<urn:…>`, `<mailto:…>`, `<did:…>`) sniffs as Turtle.
@@ -62,6 +67,9 @@ source urn:http:get url=https://example.org/thing | urn:rdf:transrept as=applica
 
 # Render any graph as an HTML table:
 source urn:http:get url=https://example.org/thing | urn:rdf:transrept as=text/html
+
+# Or name the resource instead of piping it, read under your own capability:
+source urn:rdf:transrept src=urn:org:agenda:week as=text/html
 ```
 
 Mount it in any kernel — the CLI's embedded space, the in-browser kernel:

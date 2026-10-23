@@ -15,6 +15,12 @@
 //! ```
 //!
 //! The kernel pipes the fetched bytes into `content`; `as` picks the representation.
+//! Instead of `content`, `src=<iri>` names the resource to transrept: it is resolved through
+//! the kernel under the caller's capability, and the answer follows its golden thread:
+//!
+//! ```text
+//! source urn:rdf:transrept src=urn:org:agenda:week as=text/html
+//! ```
 //!
 //! The default `transrept` feature provides `space()` and all formats. With
 //! `default-features = false`, Turtle/JSON depth scans, canonicalization and

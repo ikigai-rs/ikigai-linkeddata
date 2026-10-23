@@ -4,7 +4,7 @@ use crate::{
 };
 
 use ikigai_core::{
-    space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, FnEndpoint, Invocation,
+    space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, InputGroup, Invocation,
     Iri, ReprType, Representation, Result, Verb,
 };
 use oxrdf::{Graph, Quad, Triple};
@@ -14,6 +14,9 @@ use oxrdfio::{RdfFormat, RdfParser, RdfSerializer};
 /// document, a graph reference-or-document, a media type and a mode token are all
 /// scalars an agent supplies as text; `ArgSpec` has no narrower class for a document.
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+
+/// The XSD `anyURI` datatype IRI — the `class` of `urn:rdf:transrept`'s `src=`, one IRI.
+const XSD_ANY_URI: &str = "http://www.w3.org/2001/XMLSchema#anyURI";
 
 /// The space binding `urn:rdf:transrept`. Mount it in any kernel (the CLI's embedded
 /// space, the in-browser kernel) to give it RDF content negotiation.
@@ -227,101 +230,171 @@ pub fn space() -> EndpointSpace {
     EndpointSpace::new()
         .bind(Exact::new("urn:rdf:union"), UnionEndpoint)
         .bind(Exact::new("urn:rdf:diff"), DiffEndpoint)
-        .bind(
-            Exact::new("urn:rdf:transrept"),
-            FnEndpoint::new("rdf-transrept", |inv: &Invocation<'_>| transrept(inv))
-                .with_description(
-                    Description::new("rdf-transrept")
-                        .title("RDF transreption")
-                        .summary(
-                            "Re-serialize an RDF graph into another syntax — client-side content \
-                     negotiation. Pipe a resource in and choose `as`.",
-                        )
-                        .verb(Verb::Source)
-                        .verb(Verb::Meta)
-                        .input(
-                            ArgSpec::new("content")
-                                .summary(
-                                    "the RDF document to transrept — usually piped in (e.g. from \
-                                 urn:http:get)",
-                                )
-                                .class(XSD_STRING),
-                        )
-                        .input(
-                            ArgSpec::new("as")
-                                .summary(
-                                    "target representation: text/turtle (default), \
-                                 application/n-triples, application/n-quads, application/trig, \
-                                 application/rdf+xml, application/ld+json, or text/html",
-                                )
-                                .class(XSD_STRING)
-                                .default_value("text/turtle"),
-                        )
-                        // Every face `as=` can select is a declared output — the same list as
-                        // the transreptor's `to` below (a test pins that). Declaring them all is
-                        // what lets a conformance walk resolve and parse each RDF face in turn.
-                        .output("text/turtle")
-                        .output("application/n-triples")
-                        .output("application/n-quads")
-                        .output("application/trig")
-                        .output("application/rdf+xml")
-                        .output("application/ld+json")
-                        .output("text/html")
-                        // First-class `ik:Transreptor`: the media types it converts between. The
-                        // input syntax is *sniffed* (see `sniff`), so it accepts opaque
-                        // `application/octet-stream` too — the universal "raw, not-yet-typed
-                        // bytes" a fetch or file read delivers. `text/html` is output-only (the
-                        // human subject/predicate/object table). Drives selection: a single
-                        // auto-invocable hop (`content` + `as`) over any of these.
-                        .transreptor(
-                            [
-                                "text/turtle",
-                                "application/n-triples",
-                                "application/n-quads",
-                                "application/trig",
-                                "application/rdf+xml",
-                                "application/ld+json",
-                                "application/octet-stream",
-                            ],
-                            [
-                                "text/turtle",
-                                "application/n-triples",
-                                "application/n-quads",
-                                "application/trig",
-                                "application/rdf+xml",
-                                "application/ld+json",
-                                "text/html",
-                            ],
-                        ),
-                ),
-        )
+        .bind(Exact::new("urn:rdf:transrept"), TransreptEndpoint)
         .named(space_iri("rdf"))
 }
 
-/// Resolve a transreption request: read the RDF from `content` (piped or named), the
-/// target syntax from `as` (default Turtle), and return the re-serialized graph.
-fn transrept(inv: &Invocation<'_>) -> Result<Representation> {
-    // Core's typed refusal, unchanged: `MissingArgument` when absent (pipe a resource in, or
-    // pass `content=…`), `InvalidArgument` when not inline or not UTF-8.
-    let input = inv.inline_str("content")?;
-    let as_type = inv.inline_str("as").unwrap_or("text/turtle");
-    let (media, bytes) = transrept_bytes(input.as_bytes(), as_type)?;
-    // Transreption is a pure function of its input bytes, so its output is *as
-    // cacheable as its input*. Mark it cacheable here; the kernel folds in the
-    // expiry of whatever was piped in (`source <X> | urn:rdf:transrept …`), so a
-    // stable source (e.g. urn:kernel:catalog) yields a cacheable result while a live
-    // fetch (no Cache-Control) yields an uncacheable one — cacheability flows down
-    // the pipe rather than being asserted unconditionally here.
-    Ok(
-        Representation::new(ReprType::new(&media).with_param("charset", "utf-8"), bytes)
-            .cacheable(),
-    )
+/// `urn:rdf:transrept` — the RDF document in `content` (piped or named), or the resource
+/// `src=` names, re-serialized as `as` (default Turtle).
+struct TransreptEndpoint;
+
+#[async_trait::async_trait]
+impl Endpoint for TransreptEndpoint {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let as_type = inv.inline_str("as").unwrap_or("text/turtle");
+        // A member of the `content`/`src` group is GIVEN when it is non-empty (`InputGroup`):
+        // a Sink-style engine sends an empty `content` when there is no body.
+        let given = |name: &str| match inv.request.args.get(name) {
+            Some(ikigai_core::ArgRef::Inline(bytes)) => !bytes.is_empty(),
+            Some(_) => true,
+            None => false,
+        };
+        let (media, bytes) = match given("src") {
+            false => {
+                // Core's typed refusal, unchanged: `MissingArgument` when absent (pipe a
+                // resource in, or pass `content=…` or `src=…`), `InvalidArgument` when not
+                // inline or not UTF-8.
+                let input = inv.inline_str("content")?;
+                transrept_bytes(input.as_bytes(), "content", as_type)?
+            }
+            true => {
+                let src = inv.inline_str("src")?;
+                if given("content") {
+                    return Err(Error::InvalidArgument {
+                        name: "src".to_string(),
+                        detail: "give content= or src=, not both".to_string(),
+                    });
+                }
+                let source = resolve_src(inv, src).await?;
+                transrept_bytes(&source.bytes, "src", as_type)?
+            }
+        };
+        // Transreption is a pure function of its input bytes, so its output is *as
+        // cacheable as its input*. Mark it cacheable here; the kernel folds in the
+        // expiry of whatever was piped in (`source <X> | urn:rdf:transrept …`), so a
+        // stable source (e.g. urn:kernel:catalog) yields a cacheable result while a live
+        // fetch (no Cache-Control) yields an uncacheable one — cacheability flows down
+        // the pipe rather than being asserted unconditionally here. A `src=` read is a
+        // sub-request, so the kernel folds its expiry and golden threads in the same way.
+        Ok(
+            Representation::new(ReprType::new(&media).with_param("charset", "utf-8"), bytes)
+                .cacheable(),
+        )
+    }
+
+    fn name(&self) -> &str {
+        "rdf-transrept"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("rdf-transrept")
+            .title("RDF transreption")
+            .summary(
+                "Re-serialize an RDF graph into another syntax — client-side content \
+                 negotiation. Pipe a resource in (or name one with `src`) and choose `as`.",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(
+                ArgSpec::new("content")
+                    .summary(
+                        "the RDF document to transrept — usually piped in (e.g. from \
+                         urn:http:get). Give this or src, not both",
+                    )
+                    .class(XSD_STRING)
+                    .optional(),
+            )
+            .input(
+                ArgSpec::new("src")
+                    .summary(
+                        "the IRI of an RDF resource to transrept instead of content: resolved \
+                         through the kernel under the caller's capability (an http(s) URL via \
+                         urn:http:get), so the answer follows the source's golden thread",
+                    )
+                    .class(XSD_ANY_URI)
+                    .optional(),
+            )
+            .group(InputGroup::exactly_one(["content", "src"]).pipe("content"))
+            .input(
+                ArgSpec::new("as")
+                    .summary(
+                        "target representation: text/turtle (default), \
+                         application/n-triples, application/n-quads, application/trig, \
+                         application/rdf+xml, application/ld+json, or text/html",
+                    )
+                    .class(XSD_STRING)
+                    .default_value("text/turtle"),
+            )
+            // Every face `as=` can select is a declared output — the same list as
+            // the transreptor's `to` below (a test pins that). Declaring them all is
+            // what lets a conformance walk resolve and parse each RDF face in turn.
+            .output("text/turtle")
+            .output("application/n-triples")
+            .output("application/n-quads")
+            .output("application/trig")
+            .output("application/rdf+xml")
+            .output("application/ld+json")
+            .output("text/html")
+            // First-class `ik:Transreptor`: the media types it converts between. The
+            // input syntax is *sniffed* (see `sniff`), so it accepts opaque
+            // `application/octet-stream` too — the universal "raw, not-yet-typed
+            // bytes" a fetch or file read delivers. `text/html` is output-only (the
+            // human subject/predicate/object table). Drives selection: a single
+            // auto-invocable hop (`content` + `as`) over any of these.
+            .transreptor(
+                [
+                    "text/turtle",
+                    "application/n-triples",
+                    "application/n-quads",
+                    "application/trig",
+                    "application/rdf+xml",
+                    "application/ld+json",
+                    "application/octet-stream",
+                ],
+                [
+                    "text/turtle",
+                    "application/n-triples",
+                    "application/n-quads",
+                    "application/trig",
+                    "application/rdf+xml",
+                    "application/ld+json",
+                    "text/html",
+                ],
+            )
+    }
+}
+
+/// The HTTP module's GET, by the name ikigai-http 0.2.0 gave it (ledger #11).
+const HTTP_GET: &str = "urn:http:get";
+
+/// Read the resource `src=` names through the kernel, under this invocation's (the caller's)
+/// capability — never a wider one — and as a recorded dependency, so its expiry and golden
+/// threads flow into the transreption. An `http(s)://` URL is not itself a bound resource, so
+/// it is fetched through [`HTTP_GET`], as ikigai-sparql's `graph=` is; anything else resolves
+/// directly.
+async fn resolve_src(inv: &Invocation<'_>, src: &str) -> Result<Representation> {
+    let src = src.trim();
+    let invalid = |detail: String| Error::InvalidArgument {
+        name: "src".to_string(),
+        detail,
+    };
+    if src.starts_with("http://") || src.starts_with("https://") {
+        let get = Iri::parse(HTTP_GET).expect("the HTTP GET name is a valid IRI");
+        let request = ikigai_core::Request::new(Verb::Source, get)
+            .with_arg("url", ikigai_core::ArgRef::Inline(src.as_bytes().to_vec()));
+        return inv.issue(request).await;
+    }
+    let iri = Iri::parse(src).map_err(|e| invalid(format!("`{src}` is not an IRI: {e}")))?;
+    inv.source(&iri).await
 }
 
 /// The pure transformation, factored out so it's testable without an [`Invocation`]:
 /// parse `input` (input syntax sniffed) and serialize it as `as_type`. Returns the
 /// canonical media type and the serialized bytes.
-fn transrept_bytes(input: &[u8], as_type: &str) -> Result<(String, Vec<u8>)> {
+///
+/// `arg` names the argument the document arrived in (`content`, or `src` for a resolved
+/// one), which a depth refusal names.
+fn transrept_bytes(input: &[u8], arg: &str, as_type: &str) -> Result<(String, Vec<u8>)> {
     let from = sniff(input);
     // Bound nesting before any parser, serializer or `Display` recurses over it, with the scan
     // that matches the parser `from` selects: triple-term depth for RDF/XML and for everything
@@ -329,12 +402,12 @@ fn transrept_bytes(input: &[u8], as_type: &str) -> Result<(String, Vec<u8>)> {
     // expander recurses once per nested node object, so it also parses on a sized thread
     // (ledger #1038, see `depth`).
     match from {
-        RdfFormat::RdfXml => check_rdfxml_nesting(input, "content")?,
+        RdfFormat::RdfXml => check_rdfxml_nesting(input, arg)?,
         RdfFormat::JsonLd { .. } => {
-            check_json_nesting(input, "content")?;
+            check_json_nesting(input, arg)?;
             return depth::on_json_ld_stack(|| convert(input, from, as_type));
         }
-        _ => check_turtle_nesting(&String::from_utf8_lossy(input), "content")?,
+        _ => check_turtle_nesting(&String::from_utf8_lossy(input), arg)?,
     }
     convert(input, from, as_type)
 }
@@ -528,7 +601,7 @@ fn esc(s: &str) -> String {
 mod tests {
     use super::*;
     use futures::executor::block_on;
-    use ikigai_core::{Capability, Kernel, Request};
+    use ikigai_core::{Capability, FnEndpoint, Kernel, Request};
     use std::sync::Arc;
 
     const GRAPH_A: &str = r#"<urn:event:1> <urn:p:summary> "Standup" .
@@ -619,7 +692,7 @@ mod tests {
 <http://example.org/me> foaf:name "Ada" ; foaf:knows <http://example.org/you> ."#;
 
     fn body(input: &str, as_type: &str) -> String {
-        let (_, bytes) = transrept_bytes(input.as_bytes(), as_type).unwrap();
+        let (_, bytes) = transrept_bytes(input.as_bytes(), "content", as_type).unwrap();
         String::from_utf8(bytes).unwrap()
     }
 
@@ -728,7 +801,7 @@ mod tests {
 
     #[test]
     fn unknown_target_is_a_clean_error() {
-        let err = transrept_bytes(TTL.as_bytes(), "application/x-nonsense").unwrap_err();
+        let err = transrept_bytes(TTL.as_bytes(), "content", "application/x-nonsense").unwrap_err();
         assert!(format!("{err}").contains("unknown target"));
     }
 
@@ -752,6 +825,166 @@ mod tests {
             !t.from.contains(&"text/html".to_string()),
             "html is output-only"
         );
+    }
+
+    /// Transrept `src=` as `as_type` through `kernel` under `cap`.
+    fn transrept_src(
+        kernel: &Kernel,
+        src: &str,
+        as_type: &str,
+        cap: &Capability,
+    ) -> Result<Representation> {
+        let request = Request::new(Verb::Source, Iri::parse("urn:rdf:transrept").unwrap())
+            .with_arg("src", ikigai_core::ArgRef::Inline(src.as_bytes().to_vec()))
+            .with_arg(
+                "as",
+                ikigai_core::ArgRef::Inline(as_type.as_bytes().to_vec()),
+            );
+        block_on(kernel.issue(request, cap))
+    }
+
+    /// `src=<iri>` resolves the named resource through the kernel and transrepts its bytes
+    /// (ledger #2144): the composition a caller used to do by reading it and passing `content=`.
+    #[test]
+    fn src_transrepts_a_referenced_resource() {
+        let out = transrept_src(
+            &graph_kernel(),
+            "urn:test:b",
+            "application/n-triples",
+            &Capability::root(),
+        )
+        .unwrap();
+        assert_eq!(out.repr_type.media_type, "application/n-triples");
+        let nt = String::from_utf8(out.bytes).unwrap();
+        assert!(
+            nt.contains("<urn:event:3> <urn:p:summary> \"Dentist\" ."),
+            "{nt}"
+        );
+        assert_eq!(nt.lines().count(), 2, "{nt}");
+        // The same answer as reading it and passing the bytes inline.
+        let (_, inline) = transrept_bytes(GRAPH_B.as_bytes(), "content", "nt").unwrap();
+        assert_eq!(nt.as_bytes(), inline);
+    }
+
+    /// The source is read under the CALLER's capability, never this module's: a caller that
+    /// cannot read it is denied through `src=` too, and one that can is answered.
+    #[test]
+    fn src_is_read_under_the_callers_capability() {
+        let space = space().bind(
+            Exact::new("urn:test:secret"),
+            FnEndpoint::new("secret", |_inv: &Invocation<'_>| {
+                Ok(Representation::new(
+                    ReprType::new("text/turtle"),
+                    GRAPH_A.as_bytes().to_vec(),
+                ))
+            })
+            .with_description(
+                Description::new("secret")
+                    .verb(Verb::Source)
+                    .requires("urn:cap:test:secret"),
+            ),
+        );
+        let kernel = Kernel::new(Arc::new(space));
+        let err = transrept_src(
+            &kernel,
+            "urn:test:secret",
+            "text/turtle",
+            &Capability::scoped(["urn:cap:test:other"]),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "{err:?}");
+        let out = transrept_src(
+            &kernel,
+            "urn:test:secret",
+            "application/n-triples",
+            &Capability::scoped(["urn:cap:test:secret"]),
+        )
+        .unwrap();
+        assert!(String::from_utf8(out.bytes).unwrap().contains("Standup"));
+    }
+
+    /// The answer carries the source's golden thread: cached while the source stands, and
+    /// recomputed from the source's new bytes once its thread is cut.
+    #[test]
+    fn src_is_golden_threaded_from_the_source() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = reads.clone();
+        let space = space().bind(
+            Exact::new("urn:test:cell"),
+            FnEndpoint::new("cell", move |_inv: &Invocation<'_>| {
+                let graph = if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    GRAPH_A
+                } else {
+                    GRAPH_B
+                };
+                Ok(
+                    Representation::new(ReprType::new("text/turtle"), graph.as_bytes().to_vec())
+                        .cacheable()
+                        .depends_on("urn:test:cell:state"),
+                )
+            }),
+        );
+        let kernel = Kernel::new(Arc::new(space));
+        let read = || {
+            let out = transrept_src(&kernel, "urn:test:cell", "nt", &Capability::root()).unwrap();
+            String::from_utf8(out.bytes).unwrap()
+        };
+        let first = read();
+        assert!(first.contains("Standup"), "{first}");
+        assert_eq!(read(), first, "served from cache while the source stands");
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "the source was read once");
+        kernel.cut("urn:test:cell:state");
+        let after = read();
+        assert!(
+            after.contains("Dentist") && !after.contains("Standup"),
+            "{after}"
+        );
+    }
+
+    /// A resolved `src=` document meets the same depth bound as `content=` before any parser
+    /// sees it, and the refusal names `src`, the argument that carried it.
+    #[test]
+    fn a_too_deep_src_document_is_refused_naming_src() {
+        let space = space().bind(
+            Exact::new("urn:test:deep"),
+            FnEndpoint::new("deep", |_inv: &Invocation<'_>| {
+                let deep = format!("{}{}", "[".repeat(1000), "]".repeat(1000));
+                Ok(Representation::new(
+                    ReprType::new("application/ld+json"),
+                    deep.into_bytes(),
+                ))
+            }),
+        );
+        let kernel = Kernel::new(Arc::new(space));
+        match transrept_src(&kernel, "urn:test:deep", "nt", &Capability::root()) {
+            Err(Error::InvalidArgument { name, detail }) => {
+                assert_eq!(name, "src", "{detail}");
+                assert!(detail.contains("MAX_JSON_NESTING"), "{detail}");
+            }
+            other => panic!("a too-deep src= document: {other:?}"),
+        }
+    }
+
+    /// `content=` and `src=` are the two ways in, exactly one at a time: both is a typed
+    /// `InvalidArgument`, and a `src=` that is not an IRI is refused naming `src`.
+    #[test]
+    fn content_and_src_are_exactly_one() {
+        let kernel = graph_kernel();
+        let request = Request::new(Verb::Source, Iri::parse("urn:rdf:transrept").unwrap())
+            .with_arg(
+                "content",
+                ikigai_core::ArgRef::Inline(GRAPH_A.as_bytes().to_vec()),
+            )
+            .with_arg("src", ikigai_core::ArgRef::Inline(b"urn:test:b".to_vec()));
+        match block_on(kernel.issue(request, &Capability::root())) {
+            Err(Error::InvalidArgument { name, .. }) => assert_eq!(name, "src"),
+            other => panic!("content= and src= together: {other:?}"),
+        }
+        match transrept_src(&kernel, "not an iri", "nt", &Capability::root()) {
+            Err(Error::InvalidArgument { name, .. }) => assert_eq!(name, "src"),
+            other => panic!("a src= that is no IRI: {other:?}"),
+        }
     }
 
     /// A required input left out is refused as core's typed `MissingArgument` naming it,
