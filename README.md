@@ -34,7 +34,9 @@ to its marking, capabilities enforced as declared. No opt-outs.
 All three crates move together to ikigai-core and ikigai-vocab 0.2.0, the streams
 release (ledger #2261). This is a breaking dependency update because core types
 appear in their public APIs. Conformance 0.11.0 now runs DATATYPES and FAILURES
-by default; all suites require zero skipped checks, with no waivers.
+by default; all suites require zero skipped checks, with no waivers. SPARQL ASK
+preserves parsed query order to avoid a long cancellation gap in an optimized
+filtered cross product over the new vocabulary; see the SPARQL budget documentation.
 
 ## License
 

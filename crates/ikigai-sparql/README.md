@@ -361,6 +361,13 @@ Every evaluation at all nine doors now runs under a **time budget**, in two laye
   evaluates and serializes in 18 ms. The default budget is over 250 times that.
   `tests/sparql_time_measure.rs` re-measures every number here when oxigraph moves.
 
+`ASK` runs without Oxigraph's query optimizations. With vocabulary 0.2.0, the optimized
+filtered cross product in `tests/sparql_time_budget.rs` returned 4.4–5.0 seconds after a
+400 ms budget in CI; preserving parsed order returned near the deadline locally. Unlike
+SELECT and CONSTRUCT, ASK yields no rows for the serializer's cancellation checks. This
+trades optimized ASK planning for more responsive cancellation on that shape; other
+upstream cancellation gaps listed below still apply.
+
 ### How a host sets it
 
 The caller can only make the budget smaller; the host decides how large it may be.

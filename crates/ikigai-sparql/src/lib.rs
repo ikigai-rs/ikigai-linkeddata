@@ -1065,9 +1065,19 @@ fn evaluate<'a>(
         .map_err(|e| Error::Endpoint(format!("SPARQL syntax error: {e}")))?;
     budget::check_query(&query, "query")?;
     egress::check_query(&query, "query")?;
-    let mut prepared = egress::evaluator()
-        .with_cancellation_token(token.clone())
-        .for_query(query);
+    let evaluator = egress::evaluator().with_cancellation_token(token.clone());
+    // ASK yields no rows to our serializer, so only dataset touches check cancellation.
+    // Oxigraph's optimized filtered cross product can spend seconds between those touches
+    // (sparql_time_budget's PRODUCT_ASK with vocab 0.2.0). Keep ASK in parsed order:
+    // the same probe then returns near its deadline. Other forms retain optimization;
+    // their serialized rows are checked individually. This does not close every upstream
+    // cancellation gap (see budget's documented limits).
+    let evaluator = if matches!(query, spargebra::Query::Ask { .. }) {
+        evaluator.without_optimizations()
+    } else {
+        evaluator
+    };
+    let mut prepared = evaluator.for_query(query);
     // `for_query` seeds the dataset from the query's own FROM / FROM NAMED, so the union is
     // the right default only when there were none.
     if prepared.dataset().is_default_dataset() {
