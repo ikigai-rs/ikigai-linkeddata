@@ -24,6 +24,11 @@
 //!    [`MAX_JOIN_OPERANDS`] in any one join and [`MAX_ALGEBRA_NODES`] in the whole query,
 //!    refused with a typed `InvalidArgument` naming the bound, like the stack bounds.
 //!
+//! `ASK` preserves parsed algebra order rather than applying oxigraph's query optimizations:
+//! an optimized filtered cross product over vocabulary 0.2.0 spent seconds between dataset
+//! touches, with no rows reaching our serializer to check the token. This improves that
+//! shape's cancellation at the cost of optimized ASK planning; the gaps below still apply.
+//!
 //! # Who sets the budget
 //!
 //! **The host, in two places, and the caller can only tighten it.**

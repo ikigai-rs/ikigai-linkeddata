@@ -53,13 +53,9 @@ futures = "0.3"
 # its own `sparql-12` is on too, which only oxigraph's `rdf-12` brings. Features unify across a
 # workspace test build, so without this line `cargo test --workspace` fails in spargebra.
 oxigraph = { workspace = true, features = ["rdf-12"] }
-# The module recipe as one test (`tests/conformance.rs`): walks every bound
-# endpoint and reports every violation at once. 0.8.0 added REQUIRED (ledger #329);
-# 0.9.0 adds core 0.1.105's contract-shape checks (REQUIRED probes input groups, OUTPUTS
-# honors output_from, PIPELINE's named-only line, VALIDATE refuses a default on a binding)
-# and RECOMPUTE; 0.10.0 adds FAILURES, off unless a suite opts in. The caret reads as a
-# range, <0.11.0, and is still a ceiling: move it when the suite moves.
-ikigai-conformance = "0.10.0"
+# The module recipe walks every bound endpoint. 0.11.0 uses core 0.2.0
+# and enables DATATYPES and FAILURES by default.
+ikigai-conformance = "0.11.0"
 
 # Oxigraph's `js` feature wires getrandom's wasm backend (paired with the
 # getrandom_backend cfg in .cargo/config.toml), so the store/query run in the browser.
