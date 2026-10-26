@@ -53,10 +53,6 @@ oxrdfio = { workspace = true, features = ["rdf-12"] }
 # `urn:transrept:auto` routes Turtle to `urn:rdf:transrept`, so the depth tests drive it too.
 # Path-only: a dev-dependency without a version is dropped from the published manifest.
 ikigai-sniff = { path = "../ikigai-sniff" }
-# The module recipe as one test (`tests/conformance.rs`): walks every bound
-# endpoint and reports every violation at once. 0.8.0 added REQUIRED (ledger #329);
-# 0.9.0 adds core 0.1.105's contract-shape checks (REQUIRED probes input groups, OUTPUTS
-# honors output_from, PIPELINE's named-only line, VALIDATE refuses a default on a binding)
-# and RECOMPUTE; 0.10.0 adds FAILURES, off unless a suite opts in. The caret reads as a
-# range, <0.11.0, and is still a ceiling: move it when the suite moves.
-ikigai-conformance = "0.10.0"
+# The module recipe walks every bound endpoint. 0.11.0 uses core 0.2.0
+# and enables DATATYPES and FAILURES by default.
+ikigai-conformance = "0.11.0"

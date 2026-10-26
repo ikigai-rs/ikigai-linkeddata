@@ -95,10 +95,10 @@ fn conforms() {
         ENDPOINTS.len(),
         "one Source action per endpoint: {report}"
     );
-    // Exactly one skip: FAILURES, off unless a suite opts in (`check_failures()`, the next wave).
+    // All checks run, including DATATYPES and FAILURES (conformance 0.11.0).
     assert_eq!(
         report.checks.skipped().count(),
-        1,
-        "every check runs but FAILURES: {report}"
+        0,
+        "every check runs: {report}"
     );
 }

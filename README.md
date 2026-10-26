@@ -27,6 +27,15 @@ All three crates pass [`ikigai-conformance`](https://crates.io/crates/ikigai-con
 every declared RDF face parsed and blank-node-free, vocabulary terms only, cacheability held
 to its marking, capabilities enforced as declared. No opt-outs.
 
+## Release notes
+
+### 0.3.0
+
+All three crates move together to ikigai-core and ikigai-vocab 0.2.0, the streams
+release (ledger #2261). This is a breaking dependency update because core types
+appear in their public APIs. Conformance 0.11.0 now runs DATATYPES and FAILURES
+by default; all suites require zero skipped checks, with no waivers.
+
 ## License
 
 Licensed under either of MIT or Apache-2.0 at your option (`MIT OR Apache-2.0`).

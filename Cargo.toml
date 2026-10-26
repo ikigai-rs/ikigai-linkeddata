@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.7"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]
@@ -11,18 +11,11 @@ repository = "https://github.com/ikigai-rs/ikigai-linkeddata"
 homepage = "https://github.com/ikigai-rs/ikigai-linkeddata"
 
 [workspace.dependencies]
-# 0.1.50 is the TRUE minimum, not a comfort pin: ikigai-sparql's update endpoint is
-# gated purely by its DECLARED `requires`, and `Kernel::issue`'s `enforce_requires`
-# (declared = enforced, before invoke and before the cache lookup) is what turns that
-# declaration into a gate. Against an older core the endpoint would parse, describe
-# and publish its capability — and admit every caller. Verified present in 0.1.50.
-# The floor is now 0.1.89, for `space_iri` (each crate's configuration-free `space()` names
-# itself `urn:iki:space:<module>`, ledger #987) and for `bind` dropping a name, which keeps a
-# host that extends one of these spaces from carrying the name over different doors.
-ikigai-core = "0.1.89" # space_iri + bind drops the name; enforce_requires; ArgSpec one_of/default
-# The ikigai vocabulary (ns# ontology + Description→Turtle). ikigai-sparql bundles its
-# schema graph so endpoint instances can be joined against the class/property defs.
-ikigai-vocab = "0.1.22"
+# 0.2.0 is the streams release (ledger #2261). The old 0.1 pins meant
+# <0.2.0 under 0.x rules; core and vocab must move together to keep one core.
+# Retains space_iri, bind dropping the name, enforce_requires, and ArgSpec one_of/default.
+ikigai-core = "0.2.0"
+ikigai-vocab = "0.2.0"
 # Oxigraph's pure-Rust RDF crates — no rocksdb, so they compile to wasm32 (the
 # browser transrepts/queries client-side). The full store is in-memory only.
 oxrdf = "0.3"
@@ -32,4 +25,4 @@ oxigraph = { version = "0.5", default-features = false }
 # (ledger #1043). 0.2.1 is the first with `check_json_nesting` (ledger #1038). Path AND version:
 # published, the version is what a consumer resolves, so ikigai-rdf 0.2.1 goes to crates.io
 # before ikigai-sparql 0.2.1 does. The workspace moves both together, so move this with it.
-ikigai-rdf = { path = "crates/ikigai-rdf", version = "0.2.7" }
+ikigai-rdf = { path = "crates/ikigai-rdf", version = "0.3.0" }
