@@ -29,7 +29,7 @@ to its marking, capabilities enforced as declared. No opt-outs.
 
 ## Release notes
 
-### 0.4.0
+### 0.3.1
 
 Streamed bodies through the two transreptors (ledger #2278, from the stream-candidates
 survey, ledger #2228); the bytes paths answer as before, and each body path, collected, is
