@@ -39,9 +39,10 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use ikigai_core::{
-    space_iri, ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, FnEndpoint,
-    Invocation, Iri, ReprType, Representation, Request, Result, Verb,
+    space_iri, ArgSpec, Body, ByteStream, Bytes, Description, Endpoint, EndpointSpace, Error,
+    Exact, FailureClass, FnEndpoint, Invocation, ReprType, Representation, Result, Verb,
 };
 
 // The media types v1 detects. `text/turtle` stands in for the whole RDF text family
@@ -117,15 +118,28 @@ impl Detector for MagicDetector {
     }
 }
 
+/// How many opening bytes [`sniff`] reads: it never looks past them, so a streamed body is
+/// classified from its first `SNIFF_PREFIX + 1` bytes (the one more says whether it goes on)
+/// and handed on unread (ledger #2278). Room for [`SCAN`] after a long run of leading
+/// whitespace.
+pub const SNIFF_PREFIX: usize = 64 * 1024;
+
 /// Detect the media type of `bytes`. Runs [`detectors`] in order; falls back to `text/plain`
 /// for other valid UTF-8 and `application/octet-stream` for binary. Never fails.
+///
+/// Only the first [`SNIFF_PREFIX`] bytes are inspected, so the answer for a whole input and
+/// for its first `SNIFF_PREFIX + 1` bytes is the same. Past the prefix, "valid UTF-8" means
+/// the prefix is, a code point cut at its end included: bytes that turn invalid later are
+/// refused by whatever decodes them as text, not guessed at here.
 pub fn sniff(bytes: &[u8]) -> &'static str {
+    let truncated = bytes.len() > SNIFF_PREFIX;
+    let bytes = &bytes[..bytes.len().min(SNIFF_PREFIX)];
     for detector in detectors() {
         if let Some(media) = detector.detect(bytes) {
             return media;
         }
     }
-    if is_text(bytes) {
+    if is_text(bytes, truncated) {
         PLAIN
     } else {
         OCTET
@@ -294,9 +308,54 @@ fn lower(bytes: &[u8]) -> Vec<u8> {
     bytes.iter().map(u8::to_ascii_lowercase).collect()
 }
 
-/// Whether the bytes are plausibly text (valid UTF-8 with no NUL) rather than binary.
-fn is_text(bytes: &[u8]) -> bool {
-    !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
+/// Whether the bytes are plausibly text (valid UTF-8 with no NUL) rather than binary. When
+/// they are a `truncated` prefix, a code point cut at the end still counts as valid.
+fn is_text(bytes: &[u8], truncated: bool) -> bool {
+    !bytes.contains(&0)
+        && match std::str::from_utf8(bytes) {
+            Ok(_) => true,
+            Err(e) => truncated && e.error_len().is_none(),
+        }
+}
+
+/// Read enough of `body` to [`sniff`] it, and hand the body back whole: the media type, and
+/// a body that yields every byte the original would have.
+///
+/// A buffer is sniffed as it is. A [`Replay`] is sniffed through a reader of its own and
+/// handed on unchanged, validator and all. A one-shot stream is read until more than
+/// [`SNIFF_PREFIX`] bytes are held (or it ends), and handed on as those chunks followed by
+/// the rest of the stream, unread. A stream that fails within the prefix fails the sniff;
+/// one that fails later carries the failure on to whoever reads it.
+async fn sniff_body(body: Body) -> Result<(&'static str, Body)> {
+    match body {
+        Body::Bytes(bytes) => Ok((sniff(&bytes), Body::Bytes(bytes))),
+        Body::Replay(replay) => {
+            let (prefix, _) = read_prefix(replay.open()).await?;
+            Ok((sniff(&prefix), Body::Replay(replay)))
+        }
+        Body::Once(stream) => {
+            let (prefix, (chunks, rest)) = read_prefix(stream).await?;
+            let held = futures_util::stream::iter(chunks.into_iter().map(Ok));
+            Ok((sniff(&prefix), Body::once(held.chain(rest))))
+        }
+    }
+}
+
+/// The first `SNIFF_PREFIX + 1` bytes of `stream` (fewer when it ends sooner), with the
+/// chunks read for them and the stream left after them. Never reads a chunk more than it
+/// needs.
+async fn read_prefix(mut stream: ByteStream) -> Result<(Vec<u8>, (Vec<Bytes>, ByteStream))> {
+    let (mut prefix, mut chunks) = (Vec::new(), Vec::new());
+    while prefix.len() <= SNIFF_PREFIX {
+        let Some(chunk) = stream.next().await else {
+            break;
+        };
+        let chunk = chunk?;
+        let take = chunk.len().min(SNIFF_PREFIX + 1 - prefix.len());
+        prefix.extend_from_slice(&chunk[..take]);
+        chunks.push(chunk);
+    }
+    Ok((prefix, (chunks, stream)))
 }
 
 /// The name [`space`] claims: `urn:iki:space:sniff`.
@@ -338,20 +397,34 @@ pub fn space() -> EndpointSpace {
 /// `urn:transrept:auto` — sniff the piped bytes, then transrept them to `as=` by selecting
 /// and running the matching transreptor chain. The convenience that needs no input-type
 /// knowledge: dereference an opaque resource straight into the representation you want.
+///
+/// The body path ([`Endpoint::invoke_body`]) is the endpoint: `content` is read in whichever
+/// form it came ([`Invocation::content_body`]), only its first [`SNIFF_PREFIX`] bytes are
+/// sniffed ([`sniff_body`]), and the plan runs through the kernel's own executor
+/// ([`Invocation::transrept`]), so an incremental step is handed the stream uncollected. The
+/// bytes path collects that answer under the run's byte budget.
 struct AutoTransrept;
 
 #[async_trait]
 impl Endpoint for AutoTransrept {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        // Collected under the run's byte budget: refused past it, never truncated.
+        let mut answer = self.invoke_body(inv).await?;
+        let body = std::mem::replace(&mut answer.bytes, Body::Bytes(Bytes::new()));
+        let bytes = inv.collect(body).await?;
+        Ok(answer.map_body(|_| Vec::from(bytes)))
+    }
+
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
         // Core's typed refusal, unchanged: `MissingArgument` when absent (pipe a resource in,
-        // or pass `content=…`), `InvalidArgument` when not inline.
-        let bytes = inv.inline_arg("content")?;
-        let from = sniff(bytes);
+        // or pass `content=…`).
+        let body = inv.content_body("content").await?;
         let to = inv.inline_str("as").unwrap_or(TURTLE);
+        let (from, body) = sniff_body(body).await?;
 
         // Already the requested type → pass through (re-typed from octet-stream to what it is).
         if from == to {
-            return Ok(Representation::new(ReprType::new(from), bytes.to_vec()).cacheable());
+            return Ok(Representation::from_body(ReprType::new(from), body).cacheable());
         }
 
         let plan = inv.select_transreptor(from, to).ok_or_else(|| {
@@ -359,19 +432,11 @@ impl Endpoint for AutoTransrept {
                 "urn:transrept:auto: no transreptor from sniffed `{from}` to `{to}`"
             ))
         })?;
-
-        // Run the chain: each step takes the running bytes as `content` and its target as `as`.
-        let mut current = Representation::new(ReprType::new(from), bytes.to_vec());
-        for step in plan {
-            let iri = Iri::parse(&step.endpoint).map_err(|e| {
-                Error::Endpoint(format!("bad transreptor IRI `{}`: {e}", step.endpoint))
-            })?;
-            let request = Request::new(Verb::Source, iri)
-                .with_arg("content", ArgRef::Inline(current.bytes))
-                .with_arg("as", ArgRef::Inline(step.to.into_bytes()));
-            current = inv.issue(request).await?;
-        }
-        Ok(current.cacheable())
+        // The kernel's plan executor, not a copy of it: each step is handed the running body
+        // as its `content` and its target as `as`, streamed to a step that reads
+        // incrementally, collected under the run's byte budget for any other.
+        let input = Representation::from_body(ReprType::new(from), body);
+        Ok(inv.transrept(input, &plan).await?.cacheable())
     }
 
     fn name(&self) -> &str {
@@ -416,6 +481,9 @@ impl Endpoint for AutoTransrept {
             // `as_selects_the_served_type` below, and this comment is the record
             // until core can say "any".
             .output(TURTLE)
+            // A streamed `content` is collected under the run's byte budget by any step
+            // that does not read incrementally, and by the bytes path: past it, refused.
+            .fails(FailureClass::OverBudget)
     }
 }
 
@@ -560,9 +628,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sniffs_no_further_than_its_prefix() {
+        // Whatever follows the first SNIFF_PREFIX + 1 bytes changes nothing: the answer for
+        // the whole is the answer for the prefix a stream is sniffed from.
+        let mut text = vec![b'a'; SNIFF_PREFIX - 1];
+        text.extend_from_slice("é and more".as_bytes()); // a code point cut at the prefix
+        assert_eq!(sniff(&text), PLAIN);
+        assert_eq!(sniff(&text[..SNIFF_PREFIX + 1]), PLAIN);
+        let mut binary_later = text.clone();
+        binary_later.extend_from_slice(&[0, 0xFF]);
+        assert_eq!(sniff(&binary_later), PLAIN);
+        // Within the prefix a NUL or invalid UTF-8 still reads as binary.
+        assert_eq!(sniff(b"abc\0def"), OCTET);
+        assert_eq!(sniff(b"abc\xFF"), OCTET);
+        // A short input cut mid code point is not a prefix: binary, as before.
+        assert_eq!(sniff(&"é".as_bytes()[..1]), OCTET);
+    }
+
+    #[test]
+    fn a_stream_is_sniffed_from_its_prefix_and_handed_on_whole() {
+        let mut input = b"@prefix ex: <http://e/> .\n".to_vec();
+        input.resize(3 * SNIFF_PREFIX, b'#');
+        let polled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = polled.clone();
+        let chunks: Vec<Bytes> = input.chunks(1000).map(Bytes::copy_from_slice).collect();
+        let total = chunks.len();
+        let body = Body::once(futures::stream::iter(chunks).map(move |c| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(c)
+        }));
+        let (media, body) = futures::executor::block_on(sniff_body(body)).unwrap();
+        assert_eq!(media, TURTLE);
+        let read = polled.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(read, SNIFF_PREFIX / 1000 + 1, "of {total}");
+        let whole = futures::executor::block_on(body.collect(usize::MAX)).unwrap();
+        assert_eq!(whole, input);
+    }
+
     // --- urn:transrept:auto (sniff → dispatch), end-to-end through a kernel ---
 
-    use ikigai_core::{Capability, Kernel};
+    use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request};
     use std::sync::Arc;
 
     /// A stub auto-invocable transreptor turtle → text/html that wraps its `content`, so a

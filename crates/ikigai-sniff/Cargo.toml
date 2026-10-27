@@ -13,6 +13,7 @@ categories = ["web-programming", "parsing"]
 [dependencies]
 ikigai-core = { workspace = true }
 async-trait = "0.1"
+futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 futures = "0.3"
