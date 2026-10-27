@@ -202,8 +202,8 @@ fn a_blob_nothing_converts_is_refused_after_the_prefix_alone() {
         f.kernel
             .issue_body(auto(big(), "text/turtle"), &Capability::root()),
     )
-    .err()
-    .expect("no transreptor from image/png");
+    .map(|_| ())
+    .expect_err("no transreptor from image/png");
     assert!(format!("{err}").contains("image/png"), "{err}");
     let polled = f.polled.load(Ordering::SeqCst);
     assert!(
@@ -220,8 +220,8 @@ fn past_the_byte_budget_the_answer_is_over_budget() {
         f.kernel
             .issue_body(auto(big(), "text/html"), &Capability::root()),
     )
-    .err()
-    .expect("1 MiB collected under 64 KiB");
+    .map(|_| ())
+    .expect_err("1 MiB collected under 64 KiB");
     assert!(matches!(err, Error::OverBudget { .. }), "{err:?}");
     assert_eq!(err.class(), FailureClass::OverBudget);
 
