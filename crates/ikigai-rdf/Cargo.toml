@@ -21,12 +21,14 @@ oxrdf = { workspace = true }
 # ONE copy; when oxrdfio's floor moves, move this with oxrdfxml's quick-xml line.
 quick-xml = { version = "0.37", optional = true }
 oxttl = "0.2"
+# The streamed body of `urn:rdf:transrept` (ledger #2278); core already depends on it.
+futures-util = { version = "0.3", default-features = false, optional = true }
 
 [features]
 # Preserve the full endpoint API by default. Scan-only/Turtle consumers opt out.
 default = ["transrept"]
 # oxrdfio 0.2 bundles every syntax; none is needed by the standalone depth scans.
-transrept = ["dep:oxrdfio", "rdfxml"]
+transrept = ["dep:oxrdfio", "dep:futures-util", "rdfxml"]
 # XML scanning can also be used without the full transreption parser graph.
 rdfxml = ["dep:quick-xml"]
 # RDF 1.2: the parsers accept triple terms (`<<( … )>>`), and `BlankNodeLabels` and

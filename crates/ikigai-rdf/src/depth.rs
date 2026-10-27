@@ -243,82 +243,145 @@ fn too_deep(arg: &str, how: &str) -> Error {
 /// oxigraph's `Store::load_from_reader` does. A caller that must read past errors needs a scan
 /// in the parser's own lexer mode, which this crate does not offer.
 pub fn check_turtle_nesting(text: &str, arg: &str) -> Result<()> {
-    let b = text.as_bytes();
-    let at = |i: usize| b.get(i).copied();
-    let mut depth = 0usize;
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'#' => {
-                while i < b.len() && b[i] != b'\n' && b[i] != b'\r' {
-                    i += 1;
-                }
-            }
-            q @ (b'"' | b'\'') => {
-                if at(i + 1) == Some(q) && at(i + 2) == Some(q) {
-                    // A long string: ends at the first unescaped triple quote.
-                    i += 3;
-                    while i < b.len() {
-                        if b[i] == b'\\' {
-                            i += 2;
-                        } else if b[i] == q && at(i + 1) == Some(q) && at(i + 2) == Some(q) {
-                            i += 3;
-                            break;
-                        } else {
-                            i += 1;
-                        }
-                    }
-                } else {
-                    // A short string: ends at the quote, and NOT at a line end, which Turtle
-                    // forbids but oxttl's `lenient()` lexer (lexer.rs:674) reads straight
-                    // through. Stopping there would take the real closing quote for an
-                    // opening one and hide what follows it. (The strict lexer errors at the
-                    // line end instead, and the doors here stop at that error.)
-                    i += 1;
-                    while i < b.len() {
-                        match b[i] {
-                            b'\\' => i += 2,
-                            c if c == q => {
-                                i += 1;
-                                break;
-                            }
-                            _ => i += 1,
-                        }
-                    }
-                }
-            }
-            b'<' if at(i + 1) == Some(b'<') => {
-                depth += 1;
-                if depth > MAX_TURTLE_NESTING {
-                    return Err(too_deep(arg, "`<<( … )>>` or `<< … >>`"));
-                }
-                i += 2;
-            }
-            b'<' => {
-                // An IRI, read as oxttl reads it: everything up to the first `>`, a `\` escaping
-                // what follows. NOT only IRIREF's characters: in lenient mode oxttl validates
-                // nothing inside the brackets, so `<x"> , <<( …` is one IRI and then real
-                // nesting, which a stricter reading would mistake for a string.
-                let mut j = i + 1;
-                while j < b.len() && b[j] != b'>' {
-                    j += if b[j] == b'\\' { 2 } else { 1 };
-                }
-                if j >= b.len() {
-                    // Never closed: the parser fails here, and builds nothing after it.
-                    break;
-                }
-                i = j + 1;
-            }
-            b'>' if at(i + 1) == Some(b'>') => {
-                depth = depth.saturating_sub(1);
-                i += 2;
-            }
-            // `\` outside a string is a prefixed name's escape (`ex:a\#b`): skip what it escapes.
-            b'\\' => i += 2,
-            _ => i += 1,
+    // The bytes, not the characters: every token the scan decides on is ASCII, and a byte past
+    // ASCII (or the replacement character a lossy decode leaves) is text to it either way.
+    TurtleNesting::new(arg).feed(text.as_bytes())
+}
+
+/// [`check_turtle_nesting`]'s reading, **incrementally** (ledger #2278): fed a document in
+/// pieces, split anywhere, it keeps its place between them and refuses at the first piece
+/// that takes `<<` past [`MAX_TURTLE_NESTING`]. A streaming door feeds each chunk here
+/// BEFORE the parser sees it, so the bound holds as the parser goes, never checked after.
+/// `check_turtle_nesting` is this, fed the whole text at once: one reading, not two.
+pub(crate) struct TurtleNesting<'a> {
+    arg: &'a str,
+    depth: usize,
+    state: Lexing,
+}
+
+/// Where [`TurtleNesting`] is, between two bytes.
+#[derive(Clone, Copy)]
+enum Lexing {
+    /// Code: outside every string, IRI and comment.
+    Code,
+    /// Code, after one `<`: the next byte decides `<<` or an IRI.
+    Lt,
+    /// Code, after one `>`: the next byte decides `>>`.
+    Gt,
+    /// Skipping the one byte a `\` escapes, then back to `then`.
+    Escaped(Inside),
+    /// After `n` (1 or 2) opening quotes `q`: a third opens a long string.
+    Quotes(u8, u8),
+    /// Inside a short string closed by `q`.
+    Short(u8),
+    /// Inside a long string closed by three `q`; `run` of them seen so far.
+    Long(u8, u8),
+    /// Inside a `<…>` IRI, to the first `>`.
+    Iri,
+    /// Inside a `#` comment, to the line end.
+    Comment,
+}
+
+/// The state an escaped byte returns to.
+#[derive(Clone, Copy)]
+enum Inside {
+    Code,
+    Short(u8),
+    Long(u8),
+    Iri,
+}
+
+impl<'a> TurtleNesting<'a> {
+    /// A scan at the start of a document; a refusal names `arg`.
+    pub(crate) fn new(arg: &'a str) -> Self {
+        TurtleNesting {
+            arg,
+            depth: 0,
+            state: Lexing::Code,
         }
     }
-    Ok(())
+
+    /// Read the next piece of the document: `Err` (a depth refusal naming `arg`) at the first
+    /// `<<` past the bound.
+    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Result<()> {
+        for &b in bytes {
+            self.step(b)?;
+        }
+        Ok(())
+    }
+
+    fn step(&mut self, b: u8) -> Result<()> {
+        self.state = match self.state {
+            Lexing::Code => return self.code(b),
+            Lexing::Lt if b == b'<' => {
+                self.depth += 1;
+                if self.depth > MAX_TURTLE_NESTING {
+                    return Err(too_deep(self.arg, "`<<( … )>>` or `<< … >>`"));
+                }
+                Lexing::Code
+            }
+            // An IRI, read as oxttl reads it: everything up to the first `>`, a `\` escaping
+            // what follows. NOT only IRIREF's characters: in lenient mode oxttl validates
+            // nothing inside the brackets, so `<x"> , <<( …` is one IRI and then real nesting,
+            // which a stricter reading would mistake for a string. One never closed is where
+            // the parser fails, and it builds nothing after it.
+            Lexing::Lt | Lexing::Iri => match b {
+                b'>' => Lexing::Code,
+                b'\\' => Lexing::Escaped(Inside::Iri),
+                _ => Lexing::Iri,
+            },
+            Lexing::Gt if b == b'>' => {
+                self.depth = self.depth.saturating_sub(1);
+                Lexing::Code
+            }
+            Lexing::Gt => return self.code(b),
+            Lexing::Escaped(Inside::Code) => Lexing::Code,
+            Lexing::Escaped(Inside::Short(q)) => Lexing::Short(q),
+            Lexing::Escaped(Inside::Long(q)) => Lexing::Long(q, 0),
+            Lexing::Escaped(Inside::Iri) => Lexing::Iri,
+            // `""` then anything else: an empty short string, and this byte is code again.
+            Lexing::Quotes(q, 2) if b != q => return self.code(b),
+            Lexing::Quotes(q, 2) => Lexing::Long(q, 0),
+            Lexing::Quotes(q, _) if b == q => Lexing::Quotes(q, 2),
+            Lexing::Quotes(q, _) | Lexing::Short(q) => self.short(q, b),
+            Lexing::Long(q, run) => match b {
+                b'\\' => Lexing::Escaped(Inside::Long(q)),
+                c if c == q && run == 2 => Lexing::Code,
+                c if c == q => Lexing::Long(q, run + 1),
+                _ => Lexing::Long(q, 0),
+            },
+            Lexing::Comment if b == b'\n' || b == b'\r' => Lexing::Code,
+            Lexing::Comment => Lexing::Comment,
+        };
+        Ok(())
+    }
+
+    /// One byte of code.
+    fn code(&mut self, b: u8) -> Result<()> {
+        self.state = match b {
+            b'#' => Lexing::Comment,
+            q @ (b'"' | b'\'') => Lexing::Quotes(q, 1),
+            b'<' => Lexing::Lt,
+            b'>' => Lexing::Gt,
+            // `\` outside a string is a prefixed name's escape (`ex:a\#b`): skip what it escapes.
+            b'\\' => Lexing::Escaped(Inside::Code),
+            _ => Lexing::Code,
+        };
+        Ok(())
+    }
+
+    /// One byte of a short string closed by `q`: it ends at the quote, and NOT at a line end,
+    /// which Turtle forbids but oxttl's `lenient()` lexer (lexer.rs:674) reads straight
+    /// through. Stopping there would take the real closing quote for an opening one and hide
+    /// what follows it. (The strict lexer errors at the line end instead, and the doors here
+    /// stop at that error.)
+    fn short(&self, q: u8, b: u8) -> Lexing {
+        match b {
+            b'\\' => Lexing::Escaped(Inside::Short(q)),
+            c if c == q => Lexing::Code,
+            _ => Lexing::Short(q),
+        }
+    }
 }
 
 /// Refuse caller RDF/XML whose `rdf:parseType` elements nest deeper than
@@ -526,5 +589,64 @@ mod tests {
                 .repeat(500)
         );
         check_rdfxml_nesting(flat.as_bytes(), "content").unwrap();
+    }
+
+    /// The incremental scan, fed a document split at EVERY point, decides as the whole-text
+    /// scan does (ledger #2278): no token, string, IRI, comment or escape read differently
+    /// because a chunk ended inside it.
+    #[test]
+    fn the_scan_fed_in_pieces_decides_as_the_whole() {
+        let deep = |open: &str, close: &str| {
+            let n = MAX_TURTLE_NESTING + 1;
+            format!(
+                "<urn:a> <urn:p> {}<urn:o>{} .\n",
+                open.repeat(n),
+                close.repeat(n)
+            )
+        };
+        let at_bound = |open: &str, close: &str| {
+            let n = MAX_TURTLE_NESTING;
+            format!(
+                "<urn:a> <urn:p> {}<urn:o>{} .\n",
+                open.repeat(n),
+                close.repeat(n)
+            )
+        };
+        let hidden = |before: &str, after: &str| format!("{before}{}{after}", deep("<<( ", " )>>"));
+        let docs = [
+            deep("<<( ", " )>>"),
+            deep("<<", ">>"),
+            at_bound("<<( ", " )>>"),
+            hidden("\"", "\""),
+            hidden("'", "'"),
+            hidden("\"\"\"", "\"\"\""),
+            hidden("'''", "'''"),
+            hidden("# ", ""),
+            hidden("<", ">"),
+            hidden("\"\" ", ""),
+            hidden("\"a\\\" ", "\""),
+            hidden("\"\"\"a\"\"b\\\"\"\" ", "\"\"\""),
+            hidden("<x\\> ", ">"),
+            hidden("ex:a\\# ", ""),
+            hidden("\"\"\"\" ", "\""),
+            format!("{} >>> {}", at_bound("<<", ">>"), deep("<<", ">>")),
+        ];
+        for doc in &docs {
+            let whole = check_turtle_nesting(doc, "content").is_ok();
+            for cut in 0..=doc.len() {
+                let mut scan = TurtleNesting::new("content");
+                let pieces = scan
+                    .feed(&doc.as_bytes()[..cut])
+                    .and_then(|()| scan.feed(&doc.as_bytes()[cut..]));
+                assert_eq!(pieces.is_ok(), whole, "cut at {cut}: {doc:?}");
+            }
+            let mut scan = TurtleNesting::new("content");
+            let bytewise = doc.as_bytes().chunks(1).try_for_each(|b| scan.feed(b));
+            assert_eq!(bytewise.is_ok(), whole, "byte by byte: {doc:?}");
+        }
+        // And the samples are not all one answer.
+        assert!(check_turtle_nesting(&docs[0], "c").is_err());
+        assert!(check_turtle_nesting(&docs[2], "c").is_ok());
+        assert!(check_turtle_nesting(&docs[3], "c").is_ok());
     }
 }

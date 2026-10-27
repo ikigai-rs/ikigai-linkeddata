@@ -29,6 +29,25 @@ to its marking, capabilities enforced as declared. No opt-outs.
 
 ## Release notes
 
+### 0.4.0
+
+Streamed bodies through the two transreptors (ledger #2278, from the stream-candidates
+survey, ledger #2228); the bytes paths answer as before, and each body path, collected, is
+its bytes answer.
+
+- `urn:transrept:auto` (ikigai-sniff) reads `content` in any form (inline, by reference, by
+  content id), sniffs only its first `SNIFF_PREFIX` + 1 bytes (64 KiB, new and public), and
+  runs the selected plan through the kernel's executor (`Invocation::transrept`) instead of
+  a private copy of it that handed every step inline bytes. An incremental step now gets the
+  stream uncollected. `sniff` itself never looks past `SNIFF_PREFIX`: an input whose first
+  64 KiB are valid UTF-8 is `text/plain` even if later bytes are not (the text decoder
+  downstream refuses those). The endpoint declares `over-budget`.
+- `urn:rdf:transrept` (ikigai-rdf) declares itself `incremental`. Turtle (N-Triples with it)
+  written as N-Triples or N-Quads is parsed as it arrives, with the `<<` nesting bound
+  counted on each chunk before the parser sees it (the depth scan is now one incremental
+  reading, which `check_turtle_nesting` runs over the whole text). Every other pair collects
+  a streamed input under the run's byte budget. Declares `over-budget`.
+
 ### 0.3.0
 
 All three crates move together to ikigai-core and ikigai-vocab 0.2.0, the streams

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]
@@ -25,4 +25,4 @@ oxigraph = { version = "0.5", default-features = false }
 # (ledger #1043). 0.2.1 is the first with `check_json_nesting` (ledger #1038). Path AND version:
 # published, the version is what a consumer resolves, so ikigai-rdf 0.2.1 goes to crates.io
 # before ikigai-sparql 0.2.1 does. The workspace moves both together, so move this with it.
-ikigai-rdf = { path = "crates/ikigai-rdf", version = "0.3.0" }
+ikigai-rdf = { path = "crates/ikigai-rdf", version = "0.4.0" }

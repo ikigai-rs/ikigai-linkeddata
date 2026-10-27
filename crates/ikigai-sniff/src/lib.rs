@@ -120,8 +120,8 @@ impl Detector for MagicDetector {
 
 /// How many opening bytes [`sniff`] reads: it never looks past them, so a streamed body is
 /// classified from its first `SNIFF_PREFIX + 1` bytes (the one more says whether it goes on)
-/// and handed on unread (ledger #2278). Room for [`SCAN`] after a long run of leading
-/// whitespace.
+/// and handed on unread (ledger #2278). Room for the detectors' 2 KiB window after a long
+/// run of leading whitespace.
 pub const SNIFF_PREFIX: usize = 64 * 1024;
 
 /// Detect the media type of `bytes`. Runs [`detectors`] in order; falls back to `text/plain`

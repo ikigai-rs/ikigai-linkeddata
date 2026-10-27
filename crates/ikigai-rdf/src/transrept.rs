@@ -1,14 +1,19 @@
+use crate::depth::TurtleNesting;
 use crate::{
     canonical_triples, check_json_nesting, check_rdfxml_nesting, check_turtle_nesting, depth,
     BlankNodeLabels,
 };
 
+use futures_util::StreamExt;
 use ikigai_core::{
-    space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, InputGroup, Invocation,
-    Iri, ReprType, Representation, Result, Verb,
+    space_iri, ArgRef, ArgSpec, Body, ByteStream, Bytes, Description, Endpoint, EndpointSpace,
+    Error, Exact, FailureClass, InputGroup, Invocation, Iri, ReprType, Representation, Result,
+    Verb,
 };
-use oxrdf::{Graph, Quad, Triple};
+use oxrdf::{Graph, GraphName, Quad, Triple};
 use oxrdfio::{RdfFormat, RdfParser, RdfSerializer};
+use oxttl::turtle::LowLevelTurtleParser;
+use oxttl::TurtleParser;
 
 /// The XSD `string` datatype IRI — the `class` of every by-value input here. An RDF
 /// document, a graph reference-or-document, a media type and a mode token are all
@@ -244,11 +249,7 @@ impl Endpoint for TransreptEndpoint {
         let as_type = inv.inline_str("as").unwrap_or("text/turtle");
         // A member of the `content`/`src` group is GIVEN when it is non-empty (`InputGroup`):
         // a Sink-style engine sends an empty `content` when there is no body.
-        let given = |name: &str| match inv.request.args.get(name) {
-            Some(ikigai_core::ArgRef::Inline(bytes)) => !bytes.is_empty(),
-            Some(_) => true,
-            None => false,
-        };
+        let given = |name: &str| given(inv, name);
         let (media, bytes) = match given("src") {
             false => {
                 // Core's typed refusal, unchanged: `MissingArgument` when absent (pipe a
@@ -260,10 +261,7 @@ impl Endpoint for TransreptEndpoint {
             true => {
                 let src = inv.inline_str("src")?;
                 if given("content") {
-                    return Err(Error::InvalidArgument {
-                        name: "src".to_string(),
-                        detail: "give content= or src=, not both".to_string(),
-                    });
+                    return Err(both_given());
                 }
                 let source = resolve_src(inv, src).await?;
                 transrept_bytes(&source.bytes, "src", as_type)?
@@ -276,10 +274,56 @@ impl Endpoint for TransreptEndpoint {
         // fetch (no Cache-Control) yields an uncacheable one — cacheability flows down
         // the pipe rather than being asserted unconditionally here. A `src=` read is a
         // sub-request, so the kernel folds its expiry and golden threads in the same way.
-        Ok(
-            Representation::new(ReprType::new(&media).with_param("charset", "utf-8"), bytes)
-                .cacheable(),
+        Ok(transrepted(&media, bytes))
+    }
+
+    /// The body path (ledger #2278): Turtle (N-Triples with it) written as N-Triples or
+    /// N-Quads is parsed AS IT ARRIVES and answered as a stream, one chunk of lines per chunk
+    /// read, with the nesting bound counted on each chunk before the parser sees it. Every
+    /// other pair, and every input that arrives as a buffer, is answered as [`invoke`]
+    /// answers it, a streamed input collected first under the run's byte budget.
+    ///
+    /// [`invoke`]: Endpoint::invoke
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
+        let as_type = inv.inline_str("as").unwrap_or("text/turtle");
+        let (arg, body) = match inv.request.args.get("src") {
+            Some(ArgRef::Inline(src)) if !src.is_empty() => {
+                if streams_to(as_type).is_none() {
+                    return self.invoke(inv).await.map(Representation::into_body);
+                }
+                if given(inv, "content") {
+                    return Err(both_given());
+                }
+                let src = inv.inline_str("src")?;
+                ("src", resolve_src_body(inv, src).await?)
+            }
+            _ => match inv.request.args.get("content") {
+                // A buffer (or nothing) is the bytes path's, unchanged.
+                Some(ArgRef::Inline(_)) | None => {
+                    return self.invoke(inv).await.map(Representation::into_body)
+                }
+                Some(_) if given(inv, "src") => return Err(both_given()),
+                Some(_) => ("content", inv.content_body("content").await?),
+            },
+        };
+        let held = match (streams_to(as_type), body) {
+            (Some(to), Body::Once(stream)) => sniff_stream(stream).await?.lines(arg, to),
+            (Some(to), Body::Replay(replay)) => sniff_stream(replay.open()).await?.lines(arg, to),
+            (_, body) => Err(body),
+        };
+        let stream = match held {
+            Ok(stream) => stream,
+            Err(body) => {
+                let bytes = inv.collect(body).await?;
+                let (media, bytes) = transrept_bytes(&bytes, arg, as_type)?;
+                return Ok(transrepted(&media, bytes).into_body());
+            }
+        };
+        Ok(Representation::from_body(
+            ReprType::new(media_base(as_type)).with_param("charset", "utf-8"),
+            Body::Once(stream),
         )
+        .cacheable())
     }
 
     fn name(&self) -> &str {
@@ -361,7 +405,182 @@ impl Endpoint for TransreptEndpoint {
                     "text/html",
                 ],
             )
+            // Reads `content` as a body, so a plan hands it a stream uncollected: Turtle
+            // (N-Triples with it) to N-Triples or N-Quads is parsed as it arrives; any
+            // other pair is collected here, under the run's byte budget.
+            .incremental()
+            // A streamed input collected past the run's byte budget is refused.
+            .fails(FailureClass::OverBudget)
     }
+}
+
+/// A transrepted answer: `bytes` as `media`, UTF-8, as cacheable as its input.
+///
+/// Transreption is a pure function of its input bytes, so its output is *as cacheable as its
+/// input*: marked cacheable here, the kernel folds in the expiry of whatever was piped in or
+/// read by `src=`.
+fn transrepted(media: &str, bytes: Vec<u8>) -> Representation {
+    Representation::new(ReprType::new(media).with_param("charset", "utf-8"), bytes).cacheable()
+}
+
+/// Whether the `content`/`src` member `name` is GIVEN: present and, inline, non-empty
+/// (`InputGroup`: a Sink-style engine sends an empty `content` when there is no body).
+fn given(inv: &Invocation<'_>, name: &str) -> bool {
+    match inv.request.args.get(name) {
+        Some(ArgRef::Inline(bytes)) => !bytes.is_empty(),
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// The refusal for a call that gives both `content` and `src`.
+fn both_given() -> Error {
+    Error::InvalidArgument {
+        name: "src".to_string(),
+        detail: "give content= or src=, not both".to_string(),
+    }
+}
+
+/// The targets written as the input is read (ledger #2278): N-Triples and N-Quads, one
+/// statement a line, so nothing waits for the end of the document.
+fn streams_to(as_type: &str) -> Option<RdfFormat> {
+    match format_for(as_type)? {
+        to @ (RdfFormat::NTriples | RdfFormat::NQuads) => Some(to),
+        _ => None,
+    }
+}
+
+/// How much of a streamed input is held to [`sniff`] it before giving up and collecting it
+/// (a document opening with more whitespace than this): the opening `<…>` token needs
+/// [`ANGLE_SCAN`] bytes after the whitespace.
+const SNIFF_HOLD: usize = 64 * 1024;
+
+/// A streamed input, its opening read: the chunks held for the sniff, the stream after them,
+/// and the syntax, when the held bytes decide it as they would decide the whole document.
+struct Sniffed {
+    format: Option<RdfFormat>,
+    held: Vec<Bytes>,
+    rest: ByteStream,
+}
+
+/// Read the opening of `stream` until [`sniff`] would answer for it what it answers for the
+/// whole document (the first byte after the whitespace, and [`ANGLE_SCAN`] after it when that
+/// is a `<`), or it ends, or [`SNIFF_HOLD`] bytes are held undecided.
+async fn sniff_stream(mut rest: ByteStream) -> Result<Sniffed> {
+    let (mut prefix, mut held) = (Vec::new(), Vec::new());
+    let mut ended = false;
+    let decided = |prefix: &[u8]| {
+        let rest = &prefix[prefix
+            .iter()
+            .take_while(|b| b.is_ascii_whitespace())
+            .count()..];
+        match rest.first() {
+            None => false,
+            Some(b'<') => rest.len() >= ANGLE_SCAN,
+            Some(_) => true,
+        }
+    };
+    while !decided(&prefix) && prefix.len() <= SNIFF_HOLD {
+        match rest.next().await {
+            Some(chunk) => {
+                let chunk = chunk?;
+                prefix.extend_from_slice(&chunk[..chunk.len().min(SNIFF_HOLD + 1)]);
+                held.push(chunk);
+            }
+            None => {
+                ended = true;
+                break;
+            }
+        }
+    }
+    let format = (ended || decided(&prefix)).then(|| sniff(&prefix));
+    Ok(Sniffed { format, held, rest })
+}
+
+impl Sniffed {
+    /// The whole input again, as a body.
+    fn body(self) -> Body {
+        let held = futures_util::stream::iter(self.held.into_iter().map(Ok));
+        Body::once(held.chain(self.rest))
+    }
+
+    /// The input transrepted to `to` as a stream of lines when it is Turtle, else the input
+    /// back, whole, for the bytes path.
+    fn lines(self, arg: &'static str, to: RdfFormat) -> std::result::Result<ByteStream, Body> {
+        match self.format {
+            Some(RdfFormat::Turtle) => Ok(turtle_lines(self.body().into_stream(), arg, to)),
+            _ => Err(self.body()),
+        }
+    }
+}
+
+/// Turtle read from `input` and written as `to` (N-Triples or N-Quads) AS IT IS READ: every
+/// chunk is scanned for nesting ([`TurtleNesting`], refused past [`MAX_TURTLE_NESTING`]
+/// before the parser sees a byte of it), handed to oxttl's push parser, and answered as the
+/// lines of the statements it completed. The same parser, the same blank-node labels and the
+/// same serializer as [`convert`], so the stream, collected, is the bytes path's answer. A
+/// parse error or a refusal ends the stream as an error item, never a clean end.
+///
+/// [`MAX_TURTLE_NESTING`]: crate::MAX_TURTLE_NESTING
+fn turtle_lines(input: ByteStream, arg: &'static str, to: RdfFormat) -> ByteStream {
+    struct Lines {
+        input: ByteStream,
+        scan: TurtleNesting<'static>,
+        parser: LowLevelTurtleParser,
+        labels: BlankNodeLabels,
+        to: RdfFormat,
+        ended: bool,
+    }
+    impl Lines {
+        /// The lines of every statement the parser has completed.
+        fn drain(&mut self) -> Result<Vec<u8>> {
+            let mut out = Vec::new();
+            let mut serializer = RdfSerializer::from_format(self.to).for_writer(&mut out);
+            while let Some(triple) = self.parser.parse_next() {
+                let triple =
+                    triple.map_err(|e| Error::Endpoint(format!("RDF parse error: {e}")))?;
+                let quad = self.labels.quad(triple.in_graph(GraphName::DefaultGraph));
+                serializer
+                    .serialize_quad(&quad)
+                    .map_err(|e| Error::Endpoint(format!("RDF serialize error: {e}")))?;
+            }
+            serializer
+                .finish()
+                .map_err(|e| Error::Endpoint(format!("RDF serialize error: {e}")))?;
+            Ok(out)
+        }
+    }
+    let lines = Lines {
+        input,
+        scan: TurtleNesting::new(arg),
+        parser: TurtleParser::new().low_level(),
+        labels: BlankNodeLabels::new(),
+        to,
+        ended: false,
+    };
+    Box::pin(futures_util::stream::try_unfold(
+        lines,
+        |mut lines| async move {
+            while !lines.ended {
+                match lines.input.next().await {
+                    Some(chunk) => {
+                        let chunk = chunk?;
+                        lines.scan.feed(&chunk)?;
+                        lines.parser.extend_from_slice(&chunk);
+                    }
+                    None => {
+                        lines.parser.end();
+                        lines.ended = true;
+                    }
+                }
+                let out = lines.drain()?;
+                if !out.is_empty() {
+                    return Ok(Some((Bytes::from(out), lines)));
+                }
+            }
+            Ok(None)
+        },
+    ))
 }
 
 /// The HTTP module's GET, by the name ikigai-http 0.2.0 gave it (ledger #11).
@@ -386,6 +605,22 @@ async fn resolve_src(inv: &Invocation<'_>, src: &str) -> Result<Representation> 
     }
     let iri = Iri::parse(src).map_err(|e| invalid(format!("`{src}` is not an IRI: {e}")))?;
     inv.source(&iri).await
+}
+
+/// [`resolve_src`], answered as the body the source produced (a stream stays one).
+async fn resolve_src_body(inv: &Invocation<'_>, src: &str) -> Result<Body> {
+    let src = src.trim();
+    if src.starts_with("http://") || src.starts_with("https://") {
+        let get = Iri::parse(HTTP_GET).expect("the HTTP GET name is a valid IRI");
+        let request = ikigai_core::Request::new(Verb::Source, get)
+            .with_arg("url", ArgRef::Inline(src.as_bytes().to_vec()));
+        return Ok(inv.issue_body(request).await?.bytes);
+    }
+    let iri = Iri::parse(src).map_err(|e| Error::InvalidArgument {
+        name: "src".to_string(),
+        detail: format!("`{src}` is not an IRI: {e}"),
+    })?;
+    Ok(inv.source_body(&iri).await?.bytes)
 }
 
 /// The pure transformation, factored out so it's testable without an [`Invocation`]:
