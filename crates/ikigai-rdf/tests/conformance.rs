@@ -71,7 +71,7 @@ const WITH: &str = "@prefix dcterms: <http://purl.org/dc/terms/> .\n\
 const SOURCE: &str = "conformance-source";
 
 /// The module's space beside [`SOURCE`], which serves [`BASE`] at `urn:example:conformance`.
-fn kernel() -> Kernel {
+fn kernel() -> (Kernel, Arc<dyn Space>) {
     let source = EndpointSpace::new().bind(
         Exact::new("urn:example:conformance"),
         FnEndpoint::new(SOURCE, |_: &Invocation<'_>| {
@@ -81,10 +81,11 @@ fn kernel() -> Kernel {
             )
         }),
     );
-    Kernel::new(Arc::new(Fallback::new(vec![
+    let space: Arc<dyn Space> = Arc::new(Fallback::new(vec![
         Arc::new(ikigai_rdf::space()) as Arc<dyn Space>,
         Arc::new(source) as Arc<dyn Space>,
-    ])))
+    ]));
+    (Kernel::new(space.clone()), space)
 }
 
 /// The suite, configured for this module (see the file docs for why each line).
@@ -106,15 +107,17 @@ fn suite() -> Suite {
 
 #[test]
 fn conforms() {
-    let kernel = kernel();
+    let (kernel, space) = kernel();
     // SPACE-NAME: `space()` is configuration-free, so it names itself `urn:iki:space:rdf`,
     // and two calls hold the same doors under that name.
     let report = suite()
+        .body_space(space)
         .self_named_space("rdf", ikigai_rdf::space)
         .run_blocking(&kernel);
     // Printed even when clean (`--nocapture`): the report is the record.
     eprintln!("{report}");
     assert!(report.is_clean(), "{report}");
+    assert!(report.unprobed.is_empty(), "every check probes: {report}");
     assert_eq!(ikigai_core::space_iri("rdf").as_str(), ikigai_rdf::SPACE_ID);
     // The walk saw exactly the endpoints declared above. A fourth bound without
     // a `pure`/`cacheable` line would be held to a weaker standard (the suite
@@ -131,7 +134,7 @@ fn conforms() {
         "one Source action per endpoint: {report}"
     );
     // Nothing is skipped: every id is already kebab-case, so NAMES runs too.
-    // All checks run, including DATATYPES and FAILURES (conformance 0.11.0).
+    // All checks run, including BODIES and BODY-INPUTS (conformance 0.12.0).
     assert_eq!(
         report.checks.skipped().count(),
         0,

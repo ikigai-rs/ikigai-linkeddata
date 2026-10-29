@@ -56,9 +56,8 @@ futures = "0.3"
 # its own `sparql-12` is on too, which only oxigraph's `rdf-12` brings. Features unify across a
 # workspace test build, so without this line `cargo test --workspace` fails in spargebra.
 oxigraph = { workspace = true, features = ["rdf-12"] }
-# The module recipe walks every bound endpoint. 0.11.0 uses core 0.2.0
-# and enables DATATYPES and FAILURES by default.
-ikigai-conformance = "0.11.0"
+# The module recipe walks every bound endpoint, including BODIES and BODY-INPUTS.
+ikigai-conformance = "0.12.0"
 
 # Oxigraph's `js` feature wires getrandom's wasm backend (paired with the
 # getrandom_backend cfg in .cargo/config.toml), so the store/query run in the browser.
