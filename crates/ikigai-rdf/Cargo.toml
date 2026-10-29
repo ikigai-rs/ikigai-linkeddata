@@ -55,6 +55,5 @@ oxrdfio = { workspace = true, features = ["rdf-12"] }
 # `urn:transrept:auto` routes Turtle to `urn:rdf:transrept`, so the depth tests drive it too.
 # Path-only: a dev-dependency without a version is dropped from the published manifest.
 ikigai-sniff = { path = "../ikigai-sniff" }
-# The module recipe walks every bound endpoint. 0.11.0 uses core 0.2.0
-# and enables DATATYPES and FAILURES by default.
-ikigai-conformance = "0.11.0"
+# The module recipe walks every bound endpoint, including BODIES and BODY-INPUTS.
+ikigai-conformance = "0.12.0"

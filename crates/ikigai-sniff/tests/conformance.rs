@@ -46,7 +46,7 @@
 //! both ids are kebab-case.
 
 use ikigai_conformance::{Fixture, Suite};
-use ikigai_core::{Kernel, Verb};
+use ikigai_core::{Kernel, MemoryContentStore, Verb};
 use std::sync::Arc;
 
 /// The two endpoints `space()` binds, by description id.
@@ -69,15 +69,20 @@ fn suite() -> Suite {
 
 #[test]
 fn conforms() {
-    let kernel = Kernel::new(Arc::new(ikigai_sniff::space()));
+    let space = Arc::new(ikigai_sniff::space());
+    let store = Arc::new(MemoryContentStore::new(1024 * 1024));
+    let kernel = Kernel::new(space.clone()).with_content_store(store.clone());
     // SPACE-NAME: `space()` is configuration-free, so it names itself `urn:iki:space:sniff`,
     // and two calls hold the same doors under that name.
     let report = suite()
+        .body_space(space)
+        .body_input_store(store)
         .self_named_space("sniff", ikigai_sniff::space)
         .run_blocking(&kernel);
     // Printed even when clean (`--nocapture`): the report is the record.
     eprintln!("{report}");
     assert!(report.is_clean(), "{report}");
+    assert!(report.unprobed.is_empty(), "every check probes: {report}");
     assert_eq!(
         ikigai_core::space_iri("sniff").as_str(),
         ikigai_sniff::SPACE_ID
@@ -95,7 +100,7 @@ fn conforms() {
         ENDPOINTS.len(),
         "one Source action per endpoint: {report}"
     );
-    // All checks run, including DATATYPES and FAILURES (conformance 0.11.0).
+    // All checks run, including BODIES and BODY-INPUTS (conformance 0.12.0).
     assert_eq!(
         report.checks.skipped().count(),
         0,

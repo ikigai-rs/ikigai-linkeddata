@@ -102,7 +102,7 @@ fn assert_shape(report: &Report, endpoints: usize) {
         report.actions, endpoints,
         "one action per endpoint (Source, or Sink for update): {report}"
     );
-    // All checks run, including DATATYPES and FAILURES (conformance 0.11.0).
+    // All checks run, including BODIES and BODY-INPUTS (conformance 0.12.0).
     assert_eq!(
         report.checks.skipped().count(),
         0,
@@ -112,12 +112,14 @@ fn assert_shape(report: &Report, endpoints: usize) {
 
 #[test]
 fn conforms() {
-    let kernel = Kernel::new(Arc::new(ikigai_sparql::space()));
+    let space = Arc::new(ikigai_sparql::space());
+    let kernel = Kernel::new(space.clone());
     let suite = FORMS
         .iter()
-        .fold(form_fixtures(Suite::new()), |suite, (id, _)| {
-            suite.pure(*id).cacheable(*id)
-        })
+        .fold(
+            form_fixtures(Suite::new().body_space(space.clone())),
+            |suite, (id, _)| suite.pure(*id).cacheable(*id),
+        )
         .self_named_space("sparql", ikigai_sparql::space)
         // The same doors as `space()` at the default ceiling, and still anonymous: the name
         // belongs to the configuration-free constructor, not to a door set.
@@ -133,6 +135,7 @@ fn conforms() {
     // Printed even when clean (`--nocapture`): the report is the record.
     eprintln!("{report}");
     assert!(report.is_clean(), "{report}");
+    assert!(report.unprobed.is_empty(), "every check probes: {report}");
     assert_shape(&report, FORMS.len());
     assert_eq!(
         ikigai_core::space_iri("sparql").as_str(),
@@ -149,7 +152,7 @@ fn shared_store_conforms() {
     // host-named declaration is about the instance the walk runs.
     let space = Arc::new(ikigai_sparql::space_with_store(Arc::clone(&store)));
     let kernel = Kernel::new(space.clone());
-    let suite = form_fixtures(Suite::new())
+    let suite = form_fixtures(Suite::new().body_space(space.clone()))
         .fixture(Fixture::new(UPDATE, Verb::Sink).arg("content", INSERT))
         .host_named_space("ikigai_sparql::space_with_store(store)", space)
         .host_named_space(

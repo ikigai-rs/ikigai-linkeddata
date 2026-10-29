@@ -17,6 +17,5 @@ futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 futures = "0.3"
-# The module recipe walks every bound endpoint. 0.11.0 uses core 0.2.0
-# and enables DATATYPES and FAILURES by default.
-ikigai-conformance = "0.11.0"
+# The module recipe walks every bound endpoint, including BODIES and BODY-INPUTS.
+ikigai-conformance = "0.12.0"
