@@ -30,6 +30,9 @@ spargebra = { version = "0.4.7", features = ["sep-0006"] }
 # 0.5.11 and spareval 0.2.7 require, so resolution unifies them on one copy.
 oxiri = "0.2.11"
 async-trait = "0.1"
+# `bindings=` (ledger #2517) is JSON, read as ikigai-store reads its own. Already in the graph
+# through oxigraph, natively and on wasm32, so it costs no new crate.
+serde_json = "1"
 
 [features]
 # TEST-ONLY. Compiles oxigraph's HTTP client into this crate's build, which is what any host gets

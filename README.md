@@ -29,6 +29,14 @@ to its marking, capabilities enforced as declared. No opt-outs.
 
 ## Release notes
 
+### 0.3.2
+
+`bindings=` on the four query forms of ikigai-sparql (ledger #2517, named requests L1): a
+JSON object of variable → term, in ikigai-store's shape, substituted into the PARSED query,
+so a parameterized request needs no string splice into SPARQL. A binding the query does not
+project is refused naming `bindings`, never ignored; `urn:sparql:update` refuses the argument.
+Additive; ikigai-rdf and ikigai-sniff move with the workspace unchanged.
+
 ### 0.3.1
 
 Streamed bodies through the two transreptors (ledger #2278, from the stream-candidates
