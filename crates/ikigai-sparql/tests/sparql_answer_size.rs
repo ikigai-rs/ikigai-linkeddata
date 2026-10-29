@@ -17,7 +17,9 @@
 //! forty concurrent copies at background priority on a laptop failed four.
 
 use futures::executor::block_on;
-use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Request, Verb};
+use ikigai_core::{
+    ArgRef, Capability, Error, Invocation, Iri, Kernel, Request, Resolution, Scope, Space, Verb,
+};
 use ikigai_sparql::budget::{AnswerBound, DEFAULT_MAX_BYTES, DEFAULT_MAX_ROWS};
 use ikigai_sparql::Store;
 use std::sync::Arc;
@@ -347,12 +349,35 @@ fn a_host_bound_past_the_ceiling_is_refused() {
 #[test]
 fn a_bound_given_by_reference_is_refused_not_ignored() {
     let shared = Arc::new(Store::new().unwrap());
-    let kernels = [
-        default_kernel(),
-        Kernel::new(Arc::new(ikigai_sparql::space_with_store(shared))),
+    let spaces = [
+        Arc::new(ikigai_sparql::space_with_budget(SIZE_PROBE_BUDGET)),
+        Arc::new(ikigai_sparql::space_with_store(shared)),
     ];
+    let kernels = spaces.each_ref().map(|space| Kernel::new(space.clone()));
+    // Current core settles scalar references before endpoint invocation. Keep the
+    // endpoint's raw-input refusal covered, and also require the kernel to refuse
+    // an unresolved bound instead of silently applying its default.
+    let invoke = |index: usize, req: Request| {
+        if let Some(ArgRef::Reference(iri)) = req
+            .args
+            .values()
+            .find(|v| matches!(v, ArgRef::Reference(_)))
+        {
+            assert!(
+                matches!(issue(&kernels[index], req.clone()), Err(Error::Unresolved(got)) if &got == iri)
+            );
+            let Resolution::Hit(resolved) = spaces[index].resolve(&req, &Scope::empty()) else {
+                panic!("bound test endpoint must resolve");
+            };
+            let caller = Capability::root();
+            let inv = Invocation::with_issuer(&req, &resolved.bindings, &caller, &kernels[index]);
+            block_on(resolved.endpoint.invoke(&inv)).map(|rep| rep.bytes)
+        } else {
+            issue(&kernels[index], req)
+        }
+    };
     let elsewhere = Iri::parse("urn:example:a-large-number").unwrap();
-    for kernel in &kernels {
+    for index in 0..kernels.len() {
         for name in ["budget", "max_rows", "max_bytes"] {
             for value in [
                 ArgRef::Reference(elsewhere.clone()),
@@ -363,7 +388,7 @@ fn a_bound_given_by_reference_is_refused_not_ignored() {
                     &[("query", "SELECT * WHERE { ?s ?p ?o } LIMIT 1")],
                 )
                 .with_arg(name, value.clone());
-                match issue(kernel, req) {
+                match invoke(index, req) {
                     Err(Error::InvalidArgument { name: got, detail }) => {
                         assert_eq!(got, name, "{detail}");
                         assert!(detail.contains("refused rather than ignored"), "{detail}");
@@ -380,7 +405,7 @@ fn a_bound_given_by_reference_is_refused_not_ignored() {
             ArgRef::Inline(b"INSERT DATA { <urn:a> <urn:b> <urn:c> }".to_vec()),
         )
         .with_arg("budget", ArgRef::Reference(elsewhere));
-    match issue(&kernels[1], req) {
+    match invoke(1, req) {
         Err(Error::InvalidArgument { name, .. }) => assert_eq!(name, "budget"),
         other => panic!("update budget by reference: {other:?}"),
     }
