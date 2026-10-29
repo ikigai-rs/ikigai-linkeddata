@@ -346,6 +346,7 @@ impl Endpoint for TransreptEndpoint {
                          urn:http:get). Give this or src, not both",
                     )
                     .class(XSD_STRING)
+                    .reads_body()
                     .optional(),
             )
             .input(

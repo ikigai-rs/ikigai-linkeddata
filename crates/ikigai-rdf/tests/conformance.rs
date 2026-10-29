@@ -44,8 +44,8 @@
 
 use ikigai_conformance::{Fixture, Suite};
 use ikigai_core::{
-    EndpointSpace, Exact, Fallback, FnEndpoint, Invocation, Kernel, ReprType, Representation,
-    Space, Verb,
+    EndpointSpace, Exact, Fallback, FnEndpoint, Invocation, Kernel, MemoryContentStore, ReprType,
+    Representation, Space, Verb,
 };
 use std::sync::Arc;
 
@@ -71,7 +71,7 @@ const WITH: &str = "@prefix dcterms: <http://purl.org/dc/terms/> .\n\
 const SOURCE: &str = "conformance-source";
 
 /// The module's space beside [`SOURCE`], which serves [`BASE`] at `urn:example:conformance`.
-fn kernel() -> (Kernel, Arc<dyn Space>) {
+fn kernel() -> (Kernel, Arc<dyn Space>, Arc<MemoryContentStore>) {
     let source = EndpointSpace::new().bind(
         Exact::new("urn:example:conformance"),
         FnEndpoint::new(SOURCE, |_: &Invocation<'_>| {
@@ -85,7 +85,12 @@ fn kernel() -> (Kernel, Arc<dyn Space>) {
         Arc::new(ikigai_rdf::space()) as Arc<dyn Space>,
         Arc::new(source) as Arc<dyn Space>,
     ]));
-    (Kernel::new(space.clone()), space)
+    let store = Arc::new(MemoryContentStore::new(1024 * 1024));
+    (
+        Kernel::new(space.clone()).with_content_store(store.clone()),
+        space,
+        store,
+    )
 }
 
 /// The suite, configured for this module (see the file docs for why each line).
@@ -107,11 +112,12 @@ fn suite() -> Suite {
 
 #[test]
 fn conforms() {
-    let (kernel, space) = kernel();
+    let (kernel, space, store) = kernel();
     // SPACE-NAME: `space()` is configuration-free, so it names itself `urn:iki:space:rdf`,
     // and two calls hold the same doors under that name.
     let report = suite()
         .body_space(space)
+        .body_input_store(store)
         .self_named_space("rdf", ikigai_rdf::space)
         .run_blocking(&kernel);
     // Printed even when clean (`--nocapture`): the report is the record.

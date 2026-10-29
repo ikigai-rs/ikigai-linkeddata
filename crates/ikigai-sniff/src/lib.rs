@@ -458,7 +458,8 @@ impl Endpoint for AutoTransrept {
                         "the bytes to transrept — usually piped in (e.g. from urn:http:get or a \
                          file)",
                     )
-                    .class(XSD_STRING),
+                    .class(XSD_STRING)
+                    .reads_body(),
             )
             .input(
                 ArgSpec::new("as")
