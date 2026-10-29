@@ -74,6 +74,7 @@
 
 #![forbid(unsafe_code)]
 
+mod bindings;
 pub mod budget;
 mod egress;
 pub mod limits;
@@ -86,7 +87,7 @@ use ikigai_core::{
 };
 use ikigai_rdf::{canonical_triples, BlankNodeLabels};
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
-use oxigraph::model::{GraphName, NamedNodeRef};
+use oxigraph::model::{GraphName, NamedNodeRef, Term, Variable};
 use oxigraph::sparql::results::{QueryResultsFormat, QueryResultsSerializer};
 use oxigraph::sparql::{CancellationToken, QueryResults};
 use spargebra::SparqlParser;
@@ -455,6 +456,8 @@ impl Endpoint for SparqlEndpoint {
             self.answer,
         )?;
         let as_type = inv.inline_str("as").ok();
+        // Read before any `graph=` source is resolved, so a malformed one costs no resolution.
+        let bound = bindings::from_request(inv)?;
 
         // The shared-store variant: run the query over the caller-owned live store.
         // Uncacheable — raw-handle writes carry no golden thread, so a cached result
@@ -469,7 +472,7 @@ impl Endpoint for SparqlEndpoint {
                 ));
             }
             let (media, bytes) =
-                query_within_budget(query_str, store, as_type, budget, answer, None)?;
+                query_within_budget(query_str, &bound, store, as_type, budget, answer, None)?;
             return Ok(Representation::new(utf8_repr(&media), bytes));
         }
 
@@ -519,8 +522,15 @@ impl Endpoint for SparqlEndpoint {
             })?;
         }
 
-        let (media, bytes) =
-            query_within_budget(query_str, &store, as_type, budget, answer, Some(&labels))?;
+        let (media, bytes) = query_within_budget(
+            query_str,
+            &bound,
+            &store,
+            as_type,
+            budget,
+            answer,
+            Some(&labels),
+        )?;
         Ok(Representation::new(utf8_repr(&media), bytes).cacheable())
     }
 
@@ -574,6 +584,21 @@ impl Endpoint for SparqlEndpoint {
                     .optional(),
             )
         };
+        let desc = desc.input(
+            ArgSpec::new("bindings")
+                .summary(
+                    "optional: values for variables in the query, as a JSON object of name → \
+                     value, bound into the PARSED query so a value is a term and never SPARQL \
+                     syntax. A bare JSON string is a plain literal; a number, an `xsd:integer` \
+                     or `xsd:double`; `true`/`false`, an `xsd:boolean`; and the SPARQL-results \
+                     term shape (`{\"type\":\"uri\",\"value\":…}`) names an IRI or a typed or \
+                     language-tagged literal. Every bound variable must appear in the query's \
+                     projection (`SELECT *` if in doubt), and a binding the query does not \
+                     mention is refused, not ignored.",
+                )
+                .class(XSD_STRING)
+                .optional(),
+        );
         let desc = answer_args(desc.input(budget_arg(self.ceiling)), self.answer).input(
             ArgSpec::new("as")
                 .summary(
@@ -671,6 +696,7 @@ impl Endpoint for SparqlUpdateEndpoint {
             "content"
         };
         limits::check_sparql(update_str, arg)?;
+        bindings::refuse(inv, "urn:sparql:update")?;
         let budget = budget::effective_budget(budget::inline_bound(inv, "budget")?, self.ceiling)?;
 
         let before = self
@@ -990,6 +1016,7 @@ fn answer_args(desc: Description, bound: budget::AnswerBound) -> Description {
 /// must be one set of bytes: see [`serialize_results`]. `None` for a shared store.
 fn query_within_budget(
     query_str: &str,
+    bindings: &[(Variable, Term)],
     store: &Store,
     as_type: Option<&str>,
     budget: Duration,
@@ -999,7 +1026,7 @@ fn query_within_budget(
     let (answer, fired) = budget::with_deadline(budget, |token| {
         limits::on_sparql_stack(query_str, || {
             serialize_results(
-                evaluate(query_str, store, token, stable.is_some())?,
+                evaluate(query_str, bindings, store, token, stable.is_some())?,
                 as_type,
                 token,
                 bound,
@@ -1056,6 +1083,7 @@ fn query_within_budget(
 /// the source dominates both.
 fn evaluate<'a>(
     query_str: &str,
+    bound: &[(Variable, Term)],
     store: &'a Store,
     token: &CancellationToken,
     per_query: bool,
@@ -1093,10 +1121,16 @@ fn evaluate<'a>(
         graphs.sort_by_cached_key(|graph| graph.to_string());
         prepared.dataset_mut().set_available_named_graphs(graphs);
     }
+    // ★ `bindings=` (ledger #2517): each term is substituted into the PARSED query, so its
+    // bytes never reach the parser, and a variable the query does not project is oxigraph's
+    // refusal, made one naming `bindings` (see the `bindings` module).
+    let mut prepared = prepared.on_store(store);
+    for (variable, term) in bound {
+        prepared = prepared.substitute_variable(variable.clone(), term.clone());
+    }
     prepared
-        .on_store(store)
         .execute()
-        .map_err(|e| Error::Endpoint(format!("query evaluation error: {e}")))
+        .map_err(|e| bindings::refusal(e.to_string(), bound))
 }
 
 /// What a serialization loop returns when the deadline has passed. The caller sees the
@@ -1434,7 +1468,7 @@ mod tests {
                 .unwrap();
         }
         let token = CancellationToken::new();
-        let results = evaluate(query, &store, &token, false).unwrap();
+        let results = evaluate(query, &[], &store, &token, false).unwrap();
         let (media, bytes) =
             serialize_results(results, as_type, &token, budget::AnswerBound::DEFAULT, None)
                 .unwrap();
@@ -1480,6 +1514,7 @@ mod tests {
         let token = CancellationToken::new();
         let results = evaluate(
             "SELECT ?o WHERE { GRAPH <urn:demo:graph> { <urn:demo:a> <urn:demo:p> ?o } }",
+            &[],
             &store,
             &token,
             false,
@@ -1528,6 +1563,38 @@ mod tests {
             assert_eq!(arg.class.as_deref(), Some(XSD_POSITIVE_INTEGER));
             assert!(arg.summary.contains("1234 ms"), "{}", arg.summary);
         }
+    }
+
+    /// The four query forms offer an optional `bindings=` on both variants (ledger #2517); the
+    /// update, which oxigraph cannot bind into, does not, and refuses one.
+    #[test]
+    fn every_query_form_declares_bindings_and_the_update_does_not() {
+        let store = Arc::new(Store::new().unwrap());
+        for (verb, id) in FORMS {
+            for shared in [None, Some(Arc::clone(&store))] {
+                let desc = SparqlEndpoint {
+                    verb,
+                    id,
+                    shared,
+                    ceiling: budget::DEFAULT_BUDGET,
+                    answer: budget::AnswerBound::DEFAULT,
+                }
+                .describe();
+                let arg = desc
+                    .inputs
+                    .iter()
+                    .find(|a| a.name == "bindings")
+                    .unwrap_or_else(|| panic!("{} offers no bindings=", desc.id));
+                assert!(!arg.required, "{}", desc.id);
+                assert_eq!(arg.class.as_deref(), Some(XSD_STRING));
+            }
+        }
+        let update = SparqlUpdateEndpoint {
+            store,
+            ceiling: budget::DEFAULT_BUDGET,
+        }
+        .describe();
+        assert!(!update.inputs.iter().any(|a| a.name == "bindings"));
     }
 
     /// The four query forms offer `max_rows=` and `max_bytes=`: optional, typed, and saying the
@@ -1660,7 +1727,7 @@ mod tests {
                 .unwrap();
         }
         let token = CancellationToken::new();
-        let results = evaluate(query, &store, &token, false).unwrap();
+        let results = evaluate(query, &[], &store, &token, false).unwrap();
         serialize_results(results, as_type, &token, budget::AnswerBound::DEFAULT, None)
             .map(|(media, _)| media)
     }

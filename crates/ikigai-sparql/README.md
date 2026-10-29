@@ -41,6 +41,7 @@ distinct, discoverable IRIs. Each accepts the same arguments:
 | `query` | the SPARQL query |
 | `graph` | one or more graph source IRIs, comma- or space-separated; each resolved **through the kernel** and loaded as a named graph |
 | `as` | result representation (see below) |
+| `bindings` | optional: values for variables in the query, as JSON, bound into the **parsed** query so a value is a term and never syntax (see [Getting a value in](#getting-a-value-in-bindings)) |
 | `budget` | optional: milliseconds; can only **lower** the space's time budget (see [Time budget](#time-budget)) |
 | `max_rows` | optional: rows (solutions, or triples); can only **lower** the space's answer bound (see [Answer size](#answer-size)) |
 | `max_bytes` | optional: serialized bytes; can only **lower** the space's answer bound |
@@ -90,6 +91,35 @@ let kernel = Kernel::new(root);
 
 Since 0.2.0, `space()` names itself `urn:iki:space:sparql` (`ikigai_sparql::SPACE_ID`); every `space_with_*`
 constructor stays anonymous, for the host to name.
+
+## Getting a value in: `bindings=`
+
+A parameterized request (a saved search, `urn:quakes:near:{region}`) must not splice its
+caller's value into the query text: `q=it's "x"` spliced into `"…"` ends the literal early,
+and the rest is parsed as SPARQL. **`bindings=` binds the value into the parsed query**
+instead (since 0.3.2, ledger #2517), the way `ikigai-store`'s query doors do and in the same
+shape, so a row read out of either binds into the other's query unchanged:
+
+```shell
+source urn:sparql:select graph=urn:file:river.nt \
+    query='SELECT ?item ?q WHERE { ?item <http://purl.org/dc/terms/title> ?t
+           FILTER(CONTAINS(LCASE(?t), LCASE(?q))) }' \
+    bindings='{"q": "it\u0027s \"x\""}'
+```
+
+It is a JSON object of variable name (no `?`) → value. A bare JSON string is a plain literal,
+a number is `xsd:integer` or `xsd:double`, `true`/`false` is `xsd:boolean`, and the SPARQL
+results term shape names anything else: `{"type":"uri","value":"urn:…"}` for an IRI, or
+`{"type":"literal","value":"…"}` with `datatype` or `xml:lang`. `null`, arrays, nested objects
+and blank nodes are refused with the reason, and so is an IRI that is not one (it has no
+escape for `>`, so it is never "closed early").
+
+⚠ **Every bound variable must be in the query's projection**: `SELECT *`, or named in the
+SELECT clause; ASK and CONSTRUCT accept any variable in scope in the pattern, and DESCRIBE the
+variables it names (`DESCRIBE ?s ?v`). That is oxigraph's rule, and it means **a binding the
+query does not mention is refused, not ignored**, so a filter you thought applied always does.
+A `bindings` that is present but not inline UTF-8 is refused too, never read as "no bindings".
+`urn:sparql:update` refuses a `bindings` argument: oxigraph has no binding door for an update.
 
 ## Shared-store variant
 

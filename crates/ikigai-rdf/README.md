@@ -21,7 +21,7 @@ all its parsers.
 For Turtle parsing helpers, canonicalization and Turtle/JSON depth checks only:
 
 ```toml
-ikigai-rdf = { version = "0.3.1", default-features = false }
+ikigai-rdf = { version = "0.3.2", default-features = false }
 ```
 
 `subclass_axioms` parses directly with `oxttl`. The depth checks themselves do not
