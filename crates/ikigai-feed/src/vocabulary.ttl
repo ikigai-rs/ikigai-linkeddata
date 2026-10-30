@@ -1,0 +1,48 @@
+# The published terms the feed form speaks that ikigai-vocab does not already know, restated
+# from their own specifications (nothing here is minted by ikigai-feed). Dublin Core
+# (dc:, dcterms:), RDF and RDFS are well known and not repeated; DCMI's abstract model
+# (dcam:) is not, so its one term is.
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix rss: <http://purl.org/rss/1.0/> .
+@prefix content: <http://purl.org/rss/1.0/modules/content/> .
+@prefix dcam: <http://purl.org/dc/dcam/> .
+@prefix enc: <http://purl.oclc.org/net/rss_2.0/enc#> .
+
+# RDF Site Summary (RSS) 1.0, https://web.resource.org/rss/1.0/spec
+rss:channel a rdfs:Class ; rdfs:label "Channel" ;
+    rdfs:comment "An information channel: the feed, or the page a set of items came from." ;
+    rdfs:isDefinedBy <https://web.resource.org/rss/1.0/spec> .
+rss:item a rdfs:Class ; rdfs:label "Item" ;
+    rdfs:comment "An item in a channel." ;
+    rdfs:isDefinedBy <https://web.resource.org/rss/1.0/spec> .
+rss:title a rdf:Property ; rdfs:label "Title" ;
+    rdfs:comment "A descriptive title for the channel or item." ;
+    rdfs:isDefinedBy <https://web.resource.org/rss/1.0/spec> .
+rss:link a rdf:Property ; rdfs:label "Link" ;
+    rdfs:comment "The URL to which an HTML rendering of the channel or item may be found." ;
+    rdfs:isDefinedBy <https://web.resource.org/rss/1.0/spec> .
+rss:description a rdf:Property ; rdfs:label "Description" ;
+    rdfs:comment "A summary of the channel or item." ;
+    rdfs:isDefinedBy <https://web.resource.org/rss/1.0/spec> .
+
+# RSS 1.0 Modules: Content, https://web.resource.org/rss/1.0/modules/content/
+content:encoded a rdf:Property ; rdfs:label "Encoded content" ;
+    rdfs:comment "The item's full content, entity-encoded HTML." ;
+    rdfs:isDefinedBy <https://web.resource.org/rss/1.0/modules/content/> .
+
+# RSS 1.0 Modules: Enclosure (mod_enclosure), http://www.xs4all.nl/~foz/mod_enclosure.html
+enc:enclosure a rdf:Property ; rdfs:label "Enclosure" ;
+    rdfs:comment "A media object attached to the item." ;
+    rdfs:isDefinedBy <http://www.xs4all.nl/~foz/mod_enclosure.html> .
+enc:type a rdf:Property ; rdfs:label "Type" ;
+    rdfs:comment "The enclosure's media type." ;
+    rdfs:isDefinedBy <http://www.xs4all.nl/~foz/mod_enclosure.html> .
+enc:length a rdf:Property ; rdfs:label "Length" ;
+    rdfs:comment "The enclosure's size in bytes." ;
+    rdfs:isDefinedBy <http://www.xs4all.nl/~foz/mod_enclosure.html> .
+
+# DCMI Metadata Terms, the DCMI Abstract Model terms, https://www.dublincore.org/specifications/dublin-core/dcmi-terms/
+dcam:memberOf a rdf:Property ; rdfs:label "Member Of" ;
+    rdfs:comment "A relationship between a resource and a vocabulary encoding scheme which indicates that the resource is a member of a set." ;
+    rdfs:isDefinedBy <http://purl.org/dc/dcam/> .

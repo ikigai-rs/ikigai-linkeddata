@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic. One logical item, written as RSS 2.0; same-atom.xml writes it as Atom. -->
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Same Feed</title>
+    <link>http://same.example.org/</link>
+    <description>One item, two syntaxes.</description>
+    <language>en</language>
+    <lastBuildDate>Fri, 09 Oct 2026 12:00:00 GMT</lastBuildDate>
+    <item>
+      <title>One item</title>
+      <link>http://same.example.org/posts/one</link>
+      <guid isPermaLink="true">http://same.example.org/posts/one</guid>
+      <description>The summary.</description>
+      <content:encoded><![CDATA[<p>The whole item.</p>]]></content:encoded>
+      <author>writer@example.org (Ada Writer)</author>
+      <pubDate>Wed, 07 Oct 2026 10:00:00 -0700</pubDate>
+      <category domain="http://example.org/tags">rust</category>
+      <category>notes</category>
+      <enclosure url="http://same.example.org/media/one.mp3" length="4242" type="audio/mpeg"/>
+    </item>
+  </channel>
+</rss>
