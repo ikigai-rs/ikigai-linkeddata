@@ -1,0 +1,33 @@
+[package]
+name = "ikigai-reason"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Bounded OWL 2 RL closure and inferred triples as cacheable ikigai resources"
+
+[dependencies]
+ikigai-core.workspace = true
+ikigai-rdf.workspace = true
+oxrdf.workspace = true
+oxrdfio.workspace = true
+reasonable = "0.4.4"
+async-trait = "0.1"
+
+[features]
+# Match the workspace's RDF 1.2 feature-unified hosts. Reasonable's feature
+# makes its rio adapter exhaustive; reasoning here still accepts RDF 1.1 only.
+rdf-12 = ["reasonable/rdf-12", "ikigai-rdf/rdf-12", "oxrdfio/rdf-12"]
+
+[dev-dependencies]
+futures = "0.3"
+ikigai-conformance = "0.12.0"
+# Sibling test builds enable oxrdf/rdf-12; reasonable must see that variant too.
+reasonable = { version = "0.4.4", features = ["rdf-12"] }
+# Standalone crate tests need the parsers' matching arms as well.
+oxrdfio = { workspace = true, features = ["rdf-12"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
