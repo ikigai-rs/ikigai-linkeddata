@@ -23,6 +23,9 @@ rdf-12 = ["reasonable/rdf-12", "ikigai-rdf/rdf-12", "oxrdfio/rdf-12"]
 
 [dev-dependencies]
 futures = "0.3"
+# examples/choosing.rs measures a SPARQL property path beside the reasoner (ledger #2640).
+# Its `rdf-12` matches the oxrdf variant the dev build already turns on below.
+ikigai-sparql = { path = "../ikigai-sparql", features = ["rdf-12"] }
 ikigai-conformance = "0.12.0"
 # Sibling test builds enable oxrdf/rdf-12; reasonable must see that variant too.
 reasonable = { version = "0.4.4", features = ["rdf-12"] }
