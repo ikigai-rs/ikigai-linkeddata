@@ -10,10 +10,19 @@
 //! plus a bounding pre-scan (`src/scan.rs`) that refuses deep input before the parse and recovers the
 //! three things feed-rs's model drops and the form needs (RSS 2.0's `isPermaLink`, RSS 1.0's
 //! `rdf:about`, `xml:lang`).
+//!
+//! A source's own conventions are data, not code (ledger #2673): [`mappings`] serves one SPARQL
+//! CONSTRUCT file per host at `urn:iki:feed:mapping:{source}` from the host's file root, and
+//! [`mapped_space`] answers `urn:iki:feed:mapped:{feed}`, the form with that mapping applied.
 #![forbid(unsafe_code)]
 
+mod mapped;
 mod scan;
 
+pub use mapped::{
+    mapped_space, mappings, source_of, Mappings, GRAPH_TEMPLATE, MAPPED_SPACE_ID, MAPPED_TEMPLATE,
+    MAPPING_FILE, MAPPING_PREFIX,
+};
 pub use scan::{ACCEPTED, MAX_FEED_DEPTH};
 
 use async_trait::async_trait;

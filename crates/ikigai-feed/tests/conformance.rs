@@ -58,3 +58,69 @@ fn conforms() {
         ikigai_feed::SPACE_ID
     );
 }
+
+/// The mapped feed (ledger #2673), walked as a host mounts it: its config-home root through
+/// ikigai-fs `cacheable_space` and the mapping overlay, SPARQL and RDF beside it, and a fixture
+/// `urn:http:get` standing in for the network.
+///
+/// - Neither door is `pure`: each fetches its feed, and the mapped feed reads its host's
+///   mapping file. Both are `cacheable`, hanging from those reads' threads.
+/// - Each needs a [`Fixture`] binding `{feed}` to a feed the fixture fetch serves.
+#[test]
+fn the_mapped_feed_conforms() {
+    use ikigai_core::{EndpointSpace, Error, Exact, FnEndpoint, ReprType, Representation, Space};
+    let root = std::env::temp_dir().join(format!("ikigai-feed-conformance-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("feed/mappings")).unwrap();
+    std::fs::write(
+        root.join("feed/mappings/example.org.rq"),
+        "PREFIX rss: <http://purl.org/rss/1.0/>\nCONSTRUCT { ?i rss:title \"mapped\" } WHERE { ?i a rss:item }\n",
+    )
+    .unwrap();
+    let files: Arc<dyn Space> = Arc::new(ikigai_fs::cacheable_space(&root));
+    let http = EndpointSpace::new().bind(
+        Exact::new("urn:http:get"),
+        FnEndpoint::new("fixture-get", |inv| match inv.inline_str("url")? {
+            "http://example.org/feed.xml" => Ok(Representation::new(
+                ReprType::new("application/rss+xml"),
+                FEED.as_bytes().to_vec(),
+            )
+            .cacheable()),
+            other => Err(Error::NotFound(other.to_string())),
+        }),
+    );
+    let space = Arc::new(Fallback::new(vec![
+        Arc::new(ikigai_feed::mapped_space()),
+        Arc::new(ikigai_feed::mappings(Arc::clone(&files))),
+        files,
+        Arc::new(ikigai_sparql::space()),
+        Arc::new(ikigai_rdf::space()),
+        Arc::new(http),
+    ]));
+    let kernel = Kernel::new(space.clone());
+    let report = Suite::new()
+        .own("feed-*")
+        .vocabulary(ikigai_feed::VOCABULARY)
+        .cacheable("feed-graph-at")
+        .cacheable("feed-mapped")
+        .fixture(
+            Fixture::new("feed-graph-at", Verb::Source)
+                .binding("feed", "http://example.org/feed.xml"),
+        )
+        .fixture(
+            Fixture::new("feed-mapped", Verb::Source)
+                .binding("feed", "http://example.org/feed.xml"),
+        )
+        .self_named_space("feed:mapped", ikigai_feed::mapped_space)
+        .body_space(space)
+        .run_blocking(&kernel);
+    std::fs::remove_dir_all(&root).ok();
+    eprintln!("{report}");
+    assert!(report.is_clean(), "{report}");
+    assert!(report.unprobed.is_empty(), "every check probes: {report}");
+    assert_eq!(report.endpoints, 2, "{report}");
+    assert_eq!(
+        report.checks.skipped().count(),
+        0,
+        "every check runs: {report}"
+    );
+}
