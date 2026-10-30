@@ -1,12 +1,12 @@
 # ikigai-linkeddata
 
 The **Linked Data toolkit** for [ikigai](https://crates.io/crates/ikigai-core) — a
-Resource-Oriented Computing (ROC) resolution kernel in Rust. This workspace ships the RDF
-and SPARQL modules as ordinary ikigai resources: mount their `space()` into any kernel
+Resource-Oriented Computing (ROC) resolution kernel in Rust. This workspace ships the RDF,
+SPARQL, and reasoning modules as ordinary ikigai resources: mount their `space()` into any kernel
 (the CLI's embedded space, the in-browser kernel) and you have content negotiation and
 query as resolvable, cacheable URIs.
 
-Both crates build on Oxigraph's pure-Rust crates with **no rocksdb**, so everything is
+The RDF and SPARQL crates build on Oxigraph's pure-Rust crates with **no rocksdb**, so everything is
 client-side and **wasm-ready** — the browser can transrept a fetched graph or run a SPARQL
 query without a server. And because they are just resources, they are **composable through
 the resource model**: a SPARQL `CONSTRUCT` can be piped straight into `urn:rdf:transrept`
@@ -17,15 +17,29 @@ to render the constructed graph as an HTML table.
 | Crate | What it does |
 | --- | --- |
 | [`ikigai-rdf`](https://crates.io/crates/ikigai-rdf) | RDF **transreption** — `urn:rdf:transrept` re-serializes an RDF graph between syntaxes (Turtle, N-Triples, N-Quads, TriG, RDF/XML, JSON-LD) or renders it as an HTML table. Input syntax is sniffed. |
+| [`ikigai-reason`](crates/ikigai-reason) | **OWL 2 RL reasoning** through reasonable 0.4.4 — `urn:reason:closure` returns input plus entailments; `urn:reason:inferred` returns only new triples. Bounded, cacheable, and invalidated through input graphs' golden threads. |
 | [`ikigai-sniff`](https://crates.io/crates/ikigai-sniff) | **Content-type sniffing and dispatch** — `urn:sniff` classifies opaque (`application/octet-stream`) bytes into a concrete media type by cheap prefix heuristics; `urn:transrept:auto` sniffs piped bytes and dispatches to the matching transreptor chain, so a caller can transrept without knowing the input type. |
 | [`ikigai-sparql`](https://crates.io/crates/ikigai-sparql) | **SPARQL** over resolvable graphs — `urn:sparql:{select,ask,construct,describe}` resolve `graph=` sources through the kernel (cacheable, golden-thread-invalidated), run `query=`, and serialize the results. Over a host's shared live store, `urn:sparql:update` adds the one **writing** verb: a transactional SPARQL 1.1 UPDATE, capability-gated on `urn:cap:sparql:update`. |
 
 See each crate's README for its endpoints, arguments, and serialization options.
 
-All three crates pass [`ikigai-conformance`](https://crates.io/crates/ikigai-conformance)
+All four crates pass [`ikigai-conformance`](https://crates.io/crates/ikigai-conformance)
 — the module recipe as one test per crate (`crates/*/tests/conformance.rs`): typed inputs,
 every declared RDF face parsed and blank-node-free, vocabulary terms only, cacheability held
 to its marking, capabilities enforced as declared. No opt-outs.
+
+## OWL 2 RL reasoning
+
+Mount `ikigai_reason::space()` beside `ikigai_rdf::space()` and the host's graph
+sources. Resolve `urn:reason:closure graph=urn:my:data,urn:my:vocabulary` to get
+input plus entailments, or `urn:reason:inferred` with the same arguments for
+only new triples. `profile=owl-rl` is the default. Turtle is the default face;
+the other RDF faces and HTML reuse RDF transreption. Nothing changes the input.
+
+Reasoning admits at most 1,000 input triples and returns at most 100,000 closure
+triples by default; hosts configure both with `space_with_limits`. Both limits
+refuse rather than truncate. See the [crate README](crates/ikigai-reason/README.md)
+for the cache contract, errors, bounds, wasm, and RDF 1.2 feature integration.
 
 ## Release notes
 
