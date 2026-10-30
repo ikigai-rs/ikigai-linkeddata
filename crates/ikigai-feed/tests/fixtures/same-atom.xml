@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic. The item of same-rss2.xml, written as Atom, with what only Atom carries. -->
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
+  <id>tag:same.example.org,2026:feed</id>
+  <title>Same Feed</title>
+  <subtitle>One item, two syntaxes.</subtitle>
+  <link href="http://same.example.org/"/>
+  <updated>2026-10-09T12:00:00Z</updated>
+  <entry>
+    <id>http://same.example.org/posts/one</id>
+    <title>One item</title>
+    <link rel="alternate" href="http://same.example.org/posts/one"/>
+    <link rel="enclosure" href="http://same.example.org/media/one.mp3" length="4242" type="audio/mpeg"/>
+    <published>2026-10-07T17:00:00Z</published>
+    <updated>2026-10-08T08:00:00Z</updated>
+    <author><name>Ada Writer</name><email>writer@example.org</email></author>
+    <category term="rust" scheme="http://example.org/tags" label="Rust"/>
+    <category term="notes"/>
+    <summary>The summary.</summary>
+    <content type="html">&lt;p&gt;The whole item.&lt;/p&gt;</content>
+  </entry>
+</feed>

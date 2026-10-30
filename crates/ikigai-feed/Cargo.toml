@@ -1,0 +1,40 @@
+[package]
+name = "ikigai-feed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "RSS 2.0, RSS 1.0 and Atom lifted into one skolemized RDF graph form, as a cacheable ikigai resource"
+
+[dependencies]
+ikigai-core.workspace = true
+ikigai-rdf.workspace = true
+oxrdf.workspace = true
+oxrdfio.workspace = true
+async-trait = "0.1"
+# The vetted parser (ledger #2624): Atom, RSS 0.9x/1.0/2.0 into one model, both date formats.
+# No default features exist; `sanitize` (ammonia) stays off — the lift carries text as written.
+feed-rs = "3.0.0"
+# The bounding pre-scan runs feed-rs's own XML reader line, so the two resolve to ONE copy.
+# When feed-rs moves its quick-xml line, move this with it.
+quick-xml = "0.42"
+# feed-rs's instants (`DateTime<Utc>`), written as xsd:dateTime.
+chrono = { version = "0.4", default-features = false }
+# Digest IRIs (RFC 6920 `nih:sha-256;…`) for items and categories with no IRI of their own.
+sha2 = "0.10"
+
+[dev-dependencies]
+futures = "0.3"
+ikigai-conformance = "0.12.0"
+# tests/river.rs runs the Book's river query over the form. `rdf-12` because sibling test
+# builds turn oxrdf's on, and an rdf-12 oxrdf builds spargebra only with it (ikigai-reason's note).
+ikigai-sparql = { path = "../ikigai-sparql", features = ["rdf-12"] }
+oxrdfio = { workspace = true, features = ["rdf-12"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+# feed-rs mints a v4 UUID for an entry with no id (this crate's id generator replaces it, but the
+# code is compiled in): on wasm32 uuid must be told where randomness comes from.
+uuid = { version = "1", features = ["js"] }

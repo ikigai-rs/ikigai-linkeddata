@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic: every name, address and post here is invented for the tests. -->
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/"
+         xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel rdf:about="http://rdf.example.org/index.rdf">
+    <title>Example RDF Site Summary</title>
+    <link>http://rdf.example.org/</link>
+    <description>A synthetic RSS 1.0 feed.</description>
+    <dc:language>en</dc:language>
+    <items>
+      <rdf:Seq>
+        <rdf:li rdf:resource="http://rdf.example.org/items/1"/>
+        <rdf:li rdf:resource="http://rdf.example.org/items/2"/>
+      </rdf:Seq>
+    </items>
+  </channel>
+  <item rdf:about="http://rdf.example.org/items/1">
+    <title>First item</title>
+    <link>http://rdf.example.org/items/1.html</link>
+    <description>The first.</description>
+    <content:encoded>&lt;p&gt;The whole first.&lt;/p&gt;</content:encoded>
+    <dc:creator>Ada Writer</dc:creator>
+    <dc:date>2026-10-07T10:00:00+02:00</dc:date>
+  </item>
+  <item rdf:about="http://rdf.example.org/items/2">
+    <title>Second item</title>
+    <link>http://rdf.example.org/items/2.html</link>
+  </item>
+</rdf:RDF>

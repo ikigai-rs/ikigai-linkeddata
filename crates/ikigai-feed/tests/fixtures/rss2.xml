@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic: every name, address and post here is invented for the tests. -->
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Example Notes</title>
+    <link>http://feeds.example.org/</link>
+    <description>A synthetic RSS 2.0 feed.</description>
+    <language>en-us</language>
+    <item>
+      <title>Permalink guid</title>
+      <link>http://feeds.example.org/posts/a.html</link>
+      <guid isPermaLink="true">http://feeds.example.org/posts/a</guid>
+      <description>&lt;p&gt;Summary of A.&lt;/p&gt;</description>
+      <content:encoded><![CDATA[<p>All of A.</p>]]></content:encoded>
+      <author>writer@example.org (Ada Writer)</author>
+      <pubDate>Wed, 07 Oct 2026 10:00:00 PDT</pubDate>
+      <category domain="http://example.org/tags">rust</category>
+      <category>Notes</category>
+      <category domain="Syndic8">1765</category>
+      <enclosure url="http://media.example.org/a.mp3" length="12345" type="audio/mpeg"/>
+    </item>
+    <item>
+      <title>Guid that is not a permalink</title>
+      <link>http://feeds.example.org/posts/b</link>
+      <guid isPermaLink="false">post-b-0001</guid>
+      <pubDate>Thu, 08 Oct 2026 09:30:00 +0200</pubDate>
+    </item>
+    <item>
+      <title>Guid with no isPermaLink, an absolute IRI</title>
+      <link>http://feeds.example.org/posts/c.html</link>
+      <guid>http://feeds.example.org/posts/c</guid>
+    </item>
+    <item>
+      <title>Guid with no isPermaLink, not an IRI</title>
+      <link>http://feeds.example.org/posts/d</link>
+      <guid>d-0004</guid>
+    </item>
+    <item>
+      <title>A false permalink that looks like one</title>
+      <link>http://feeds.example.org/posts/f</link>
+      <guid isPermaLink="false">http://feeds.example.org/guids/f</guid>
+    </item>
+    <item xml:base="http://feeds.example.org/archive/">
+      <title>Relative link under xml:base</title>
+      <link>g.html</link>
+    </item>
+    <item>
+      <title>No link and no guid</title>
+      <description>Only a title and a date.</description>
+      <pubDate>Fri, 09 Oct 2026 08:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

@@ -2,7 +2,7 @@
 
 The **Linked Data toolkit** for [ikigai](https://crates.io/crates/ikigai-core) — a
 Resource-Oriented Computing (ROC) resolution kernel in Rust. This workspace ships the RDF,
-SPARQL, and reasoning modules as ordinary ikigai resources: mount their `space()` into any kernel
+SPARQL, reasoning and feed-lifting modules as ordinary ikigai resources: mount their `space()` into any kernel
 (the CLI's embedded space, the in-browser kernel) and you have content negotiation and
 query as resolvable, cacheable URIs.
 
@@ -17,13 +17,14 @@ to render the constructed graph as an HTML table.
 | Crate | What it does |
 | --- | --- |
 | [`ikigai-rdf`](https://crates.io/crates/ikigai-rdf) | RDF **transreption** — `urn:rdf:transrept` re-serializes an RDF graph between syntaxes (Turtle, N-Triples, N-Quads, TriG, RDF/XML, JSON-LD) or renders it as an HTML table. Input syntax is sniffed. |
+| [`ikigai-feed`](crates/ikigai-feed) | **Feed normalization**: `urn:feed:graph` lifts RSS 2.0, RSS 1.0 and Atom (parsed by feed-rs) into one skolemized RDF form in RSS 1.0's vocabulary with Dublin Core. Items are named by their own IRI, dates are `xsd:dateTime`, and categories are nodes. The same lift is a (lossy) transreptor from the feed media types. |
 | [`ikigai-reason`](crates/ikigai-reason) | **OWL 2 RL reasoning** through reasonable 0.4.4 — `urn:reason:closure` returns input plus entailments; `urn:reason:inferred` returns only new triples. Bounded, cacheable, and invalidated through input graphs' golden threads. |
 | [`ikigai-sniff`](https://crates.io/crates/ikigai-sniff) | **Content-type sniffing and dispatch** — `urn:sniff` classifies opaque (`application/octet-stream`) bytes into a concrete media type by cheap prefix heuristics; `urn:transrept:auto` sniffs piped bytes and dispatches to the matching transreptor chain, so a caller can transrept without knowing the input type. |
 | [`ikigai-sparql`](https://crates.io/crates/ikigai-sparql) | **SPARQL** over resolvable graphs — `urn:sparql:{select,ask,construct,describe}` resolve `graph=` sources through the kernel (cacheable, golden-thread-invalidated), run `query=`, and serialize the results. Over a host's shared live store, `urn:sparql:update` adds the one **writing** verb: a transactional SPARQL 1.1 UPDATE, capability-gated on `urn:cap:sparql:update`. |
 
 See each crate's README for its endpoints, arguments, and serialization options.
 
-All four crates pass [`ikigai-conformance`](https://crates.io/crates/ikigai-conformance)
+All five crates pass [`ikigai-conformance`](https://crates.io/crates/ikigai-conformance)
 — the module recipe as one test per crate (`crates/*/tests/conformance.rs`): typed inputs,
 every declared RDF face parsed and blank-node-free, vocabulary terms only, cacheability held
 to its marking, capabilities enforced as declared. No opt-outs.
