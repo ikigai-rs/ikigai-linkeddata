@@ -1,4 +1,4 @@
-//! The module recipe as one test: `ikigai-conformance` walks `urn:feed:graph`, every RDF face
+//! The module recipe as one test: `ikigai-conformance` walks `urn:iki:feed:graph`, every RDF face
 //! included (through ikigai-rdf, mounted beside it as a host would), with no opt-outs.
 //!
 //! - `feed-graph` is `pure` and `cacheable`: a function of the bytes it is handed (no file,

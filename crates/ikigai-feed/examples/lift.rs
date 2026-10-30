@@ -7,7 +7,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let path = args.next().expect("a feed file");
     let bytes = std::fs::read(&path).expect("readable");
-    let mut request = Request::new(Verb::Source, Iri::parse("urn:feed:graph").unwrap())
+    let mut request = Request::new(Verb::Source, Iri::parse("urn:iki:feed:graph").unwrap())
         .with_arg("content", ArgRef::Inline(bytes));
     if let Some(base) = args.next() {
         request = request.with_arg("base", ArgRef::Inline(base.into_bytes()));

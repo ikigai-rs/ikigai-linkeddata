@@ -1,7 +1,7 @@
 //! RSS 2.0, RSS 1.0 and Atom lifted into ONE graph form, so everything downstream reads one
 //! shape (ledger #2624).
 //!
-//! `urn:feed:graph content=<feed bytes>` answers the form as Turtle (other RDF faces through
+//! `urn:iki:feed:graph content=<feed bytes>` answers the form as Turtle (other RDF faces through
 //! `as=`, by [`ikigai_rdf`]'s transreption). The form is RSS 1.0's own vocabulary with Dublin
 //! Core, plus the published terms Atom needs; the crate README documents it, with the item IRI
 //! rule, the date rule and the category shape. Every node is an IRI: there are no blank nodes.
@@ -56,7 +56,7 @@ pub const VOCABULARY: &str = include_str!("vocabulary.ttl");
 /// The lift with its transreption declared.
 pub fn space() -> EndpointSpace {
     EndpointSpace::new()
-        .bind(Exact::new("urn:feed:graph"), FeedGraph)
+        .bind(Exact::new("urn:iki:feed:graph"), FeedGraph)
         .named(space_iri("feed"))
 }
 

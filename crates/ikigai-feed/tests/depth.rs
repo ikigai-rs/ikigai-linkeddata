@@ -53,7 +53,7 @@ const SHAPES: [&str; 3] = ["xhtml", "unknown", "source"];
 
 fn door(doc: String) -> String {
     let kernel = Kernel::new(Arc::new(ikigai_feed::space()));
-    let request = Request::new(Verb::Source, Iri::parse("urn:feed:graph").unwrap())
+    let request = Request::new(Verb::Source, Iri::parse("urn:iki:feed:graph").unwrap())
         .with_arg("content", ArgRef::Inline(doc.into_bytes()));
     match block_on(kernel.issue(request, &Capability::root())) {
         Ok(rep) => format!("ok {}", rep.bytes.len()),

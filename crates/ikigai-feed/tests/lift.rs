@@ -41,7 +41,7 @@ fn issue(
     args: &[(&str, &str)],
 ) -> ikigai_core::Result<ikigai_core::Representation> {
     let request = args.iter().fold(
-        Request::new(Verb::Source, Iri::parse("urn:feed:graph").unwrap())
+        Request::new(Verb::Source, Iri::parse("urn:iki:feed:graph").unwrap())
             .with_arg("content", ArgRef::Inline(content.to_vec())),
         |r, (k, v)| r.with_arg(*k, ArgRef::Inline(v.as_bytes().to_vec())),
     );
@@ -539,7 +539,7 @@ fn the_lift_is_a_lossy_transreptor_for_the_feed_types() {
         );
         let plan = select_transreptor_with(&space, from, "text/turtle", &allow).unwrap();
         assert_eq!(plan.len(), 1);
-        assert_eq!(plan[0].endpoint, "urn:feed:graph");
+        assert_eq!(plan[0].endpoint, "urn:iki:feed:graph");
         assert!(!plan[0].lossless);
     }
     let plan =
@@ -549,5 +549,5 @@ fn the_lift_is_a_lossy_transreptor_for_the_feed_types() {
     let alone = ikigai_feed::space();
     let plan =
         select_transreptor_with(&alone, "application/rdf+xml", "text/turtle", &allow).unwrap();
-    assert_eq!(plan[0].endpoint, "urn:feed:graph");
+    assert_eq!(plan[0].endpoint, "urn:iki:feed:graph");
 }

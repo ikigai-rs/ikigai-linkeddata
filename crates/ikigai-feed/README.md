@@ -5,7 +5,7 @@ queries, a category → SKOS mapping, a site with no feed) reads one shape which
 feed was written in. The lift is an ordinary ikigai resource: pure, cacheable, wasm-ready.
 
 ```text
-source urn:http:get url=https://example.org/feed.xml | urn:feed:graph base=https://example.org/feed.xml
+source urn:http:get url=https://example.org/feed.xml | urn:iki:feed:graph base=https://example.org/feed.xml
 ```
 
 Parsing is [feed-rs](https://crates.io/crates/feed-rs) 3 (MIT; Atom, RSS 0.9x/1.0/2.0 into one
@@ -15,7 +15,7 @@ the form needs.
 
 ## The resource
 
-`urn:feed:graph` (`Source`, `Meta`):
+`urn:iki:feed:graph` (`Source`, `Meta`):
 
 | argument | | |
 | --- | --- | --- |
@@ -160,7 +160,7 @@ separate mapping resource can turn these nodes into SKOS concepts (ledger #2623)
 </rss>
 ```
 
-`urn:feed:graph base=https://notes.example.org/feed.xml` (prefixes as above; the guid is not
+`urn:iki:feed:graph base=https://notes.example.org/feed.xml` (prefixes as above; the guid is not
 a permalink, so the link names the item):
 
 ```turtle

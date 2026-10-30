@@ -45,7 +45,7 @@ fn the_books_river_query_reads_every_syntax() {
         ))
         .unwrap();
         let turtle = block_on(feeds.issue(
-            request("urn:feed:graph", &[("content", &bytes)]),
+            request("urn:iki:feed:graph", &[("content", &bytes)]),
             &Capability::root(),
         ))
         .unwrap()
