@@ -19,6 +19,8 @@ const DCAM: &str = "http://purl.org/dc/dcam/";
 const ENC: &str = "http://purl.oclc.org/net/rss_2.0/enc#";
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
+const SKOS: &str = "http://www.w3.org/2004/02/skos/core#";
+const IANA: &str = "http://www.iana.org/assignments/relation/";
 const XSD_DATE_TIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -122,6 +124,9 @@ fn no_fixture_lifts_a_blank_node() {
         "atom.xml",
         "same-rss2.xml",
         "same-atom.xml",
+        "reclaim-atom.xml",
+        "reclaim-rss2.xml",
+        "reclaim-rss1.xml",
     ] {
         for t in graph(&fixture(name), None) {
             assert!(
@@ -403,6 +408,197 @@ fn categories_are_nodes_with_term_scheme_and_label() {
     assert_eq!(
         objects(&g, &tags, &format!("{RDFS}label")),
         vec![lit("Rust")]
+    );
+}
+
+/// Ledger #2672: every link, not only the first alternate, each under its relation and with its
+/// type, hreflang and title on the target. The first alternate keeps its literal `rss:link`.
+#[test]
+fn every_link_is_carried_with_its_relation_type_hreflang_and_title() {
+    let g = graph(&fixture("reclaim-atom.xml"), None);
+    let one = "http://reclaim.example.org/posts/one";
+    let fr = "http://reclaim.example.org/fr/posts/one";
+    assert_eq!(objects(&g, one, &format!("{RSS}link")), vec![lit(one)]);
+    assert_eq!(
+        objects(&g, one, &format!("{IANA}alternate")),
+        vec![Term::from(iri(fr)), Term::from(iri(one))]
+    );
+    assert_eq!(
+        objects(&g, fr, &format!("{DCTERMS}language")),
+        vec![lit("fr")]
+    );
+    assert_eq!(objects(&g, fr, &format!("{DCTERMS}title")), vec![lit("Un")]);
+    assert_eq!(
+        objects(&g, fr, &format!("{DCTERMS}format")),
+        vec![lit("text/html")]
+    );
+    // A registered relation the form restates, under its IANA IRI.
+    assert_eq!(
+        objects(&g, one, &format!("{IANA}license")),
+        vec![Term::from(iri(
+            "http://creativecommons.org/licenses/by/4.0/"
+        ))]
+    );
+    // An extension relation: the link is kept as dcterms:relation, its relation is not.
+    assert_eq!(
+        objects(&g, one, &format!("{DCTERMS}relation")),
+        vec![Term::from(iri("http://reclaim.example.org/one.epub"))]
+    );
+    // An enclosure keeps its enc: terms and gains hreflang and title.
+    let mp3 = "http://reclaim.example.org/one.mp3";
+    assert_eq!(
+        objects(&g, one, &format!("{ENC}enclosure")),
+        vec![Term::from(iri(mp3))]
+    );
+    assert_eq!(
+        objects(&g, mp3, &format!("{ENC}type")),
+        vec![lit("audio/mpeg")]
+    );
+    assert_eq!(
+        objects(&g, mp3, &format!("{DCTERMS}language")),
+        vec![lit("en")]
+    );
+    assert_eq!(
+        objects(&g, mp3, &format!("{DCTERMS}title")),
+        vec![lit("Listen")]
+    );
+    // The channel's links too: its self link, and a WebSub hub.
+    let feed = "http://reclaim.example.org/feed.atom";
+    assert_eq!(
+        objects(&g, feed, &format!("{IANA}self")),
+        vec![Term::from(iri(feed))]
+    );
+    assert_eq!(
+        objects(&g, feed, &format!("{IANA}hub")),
+        vec![Term::from(iri("http://hub.example.net/"))]
+    );
+    // RSS 2.0's comments link is `replies`.
+    let g = graph(&fixture("reclaim-rss2.xml"), None);
+    assert_eq!(
+        objects(
+            &g,
+            "http://cast.example.org/ep/1",
+            &format!("{IANA}replies")
+        ),
+        vec![Term::from(iri("http://cast.example.org/ep/1#comments"))]
+    );
+}
+
+/// Ledger #2672: Atom's `content/@src` is `dcterms:hasFormat` with its type as
+/// `dcterms:format`; the feed an entry was copied from (`atom:source`, RSS 2.0's `source`) is
+/// `dcterms:source`.
+#[test]
+fn content_src_and_the_source_feed_are_carried() {
+    let g = graph(&fixture("reclaim-atom.xml"), None);
+    let one = "http://reclaim.example.org/posts/one";
+    let pdf = "http://reclaim.example.org/one.pdf";
+    assert_eq!(
+        objects(&g, one, &format!("{DCTERMS}hasFormat")),
+        vec![Term::from(iri(pdf))]
+    );
+    assert_eq!(
+        objects(&g, pdf, &format!("{DCTERMS}format")),
+        vec![lit("application/pdf")]
+    );
+    // The source's self link names it before its id.
+    assert_eq!(
+        objects(&g, one, &format!("{DCTERMS}source")),
+        vec![Term::from(iri("http://elsewhere.example.net/feed.atom"))]
+    );
+    // With no self link, the source's id; a relative link or src is not guessed at.
+    let two = "http://reclaim.example.org/posts/two";
+    assert_eq!(
+        objects(&g, two, &format!("{DCTERMS}source")),
+        vec![Term::from(iri("http://third.example.com/feed"))]
+    );
+    assert!(objects(&g, two, &format!("{DCTERMS}hasFormat")).is_empty());
+    // The source's own fields never land on the item or the channel.
+    assert_eq!(
+        objects(&g, one, &format!("{RSS}title")),
+        vec![lit("One, in two languages")]
+    );
+    let g = graph(&fixture("reclaim-rss2.xml"), None);
+    assert_eq!(
+        objects(
+            &g,
+            "http://cast.example.org/ep/1",
+            &format!("{DCTERMS}source")
+        ),
+        vec![Term::from(iri("http://elsewhere.example.net/rss.xml"))]
+    );
+    // RSS's content:encoded never reads as a src (feed-rs keeps its xml:base in that field).
+    let g = graph(
+        &fixture("same-rss2.xml"),
+        Some("http://same.example.org/feed"),
+    );
+    assert!(g
+        .iter()
+        .all(|t| t.predicate.as_str() != format!("{DCTERMS}hasFormat")));
+}
+
+/// Ledger #2672: a subcategory (iTunes) is its own node, named by digest of its parent's node
+/// and its term, with `skos:broader` its parent. Every level is a subject of the channel.
+#[test]
+fn category_hierarchies_are_skos_broader() {
+    let g = graph(&fixture("reclaim-rss2.xml"), None);
+    let channel = "http://cast.example.org/";
+    let technology = digest("category", &["", "Technology"]);
+    let podcasting = digest("subcategory", &[&technology, "Podcasting"]);
+    let family = digest("category", &["", "Kids & Family"]);
+    let kids = digest("subcategory", &[&family, "Education for Kids"]);
+    assert_eq!(
+        objects(&g, &podcasting, &format!("{SKOS}broader")),
+        vec![Term::from(iri(&technology))]
+    );
+    assert_eq!(
+        objects(&g, &kids, &format!("{SKOS}broader")),
+        vec![Term::from(iri(&family))]
+    );
+    assert!(objects(&g, &technology, &format!("{SKOS}broader")).is_empty());
+    assert_eq!(
+        objects(&g, &podcasting, &format!("{RDF}value")),
+        vec![lit("Podcasting")]
+    );
+    let mut nodes = [technology, podcasting, family, kids];
+    nodes.sort();
+    assert_eq!(
+        objects(&g, channel, &format!("{DCTERMS}subject")),
+        nodes.iter().map(|n| Term::from(iri(n))).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        objects(&g, channel, &format!("{DC}subject")),
+        vec![
+            lit("Education for Kids"),
+            lit("Kids & Family"),
+            lit("Podcasting"),
+            lit("Technology")
+        ]
+    );
+}
+
+/// Ledger #2672: RSS 1.0's `dc:subject`, which feed-rs does not read, recovered by the pre-scan
+/// as categories with no scheme, on the channel and on items, entities and CDATA resolved.
+#[test]
+fn rss1_dc_subject_is_a_category() {
+    let g = graph(&fixture("reclaim-rss1.xml"), None);
+    let item = "http://subjects.example.org/1";
+    assert_eq!(
+        objects(&g, item, &format!("{DC}subject")),
+        vec![lit("R&D \u{2014} notes <b>"), lit("rust")]
+    );
+    let rust = digest("category", &["", "rust"]);
+    assert!(objects(&g, item, &format!("{DCTERMS}subject")).contains(&Term::from(iri(&rust))));
+    assert_eq!(
+        objects(&g, &rust, &format!("{RDF}value")),
+        vec![lit("rust")]
+    );
+    assert_eq!(
+        objects(
+            &g,
+            "http://subjects.example.org/feed.rdf",
+            &format!("{DC}subject")
+        ),
+        vec![lit("linked data")]
     );
 }
 

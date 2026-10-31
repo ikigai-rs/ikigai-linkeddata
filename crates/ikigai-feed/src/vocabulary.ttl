@@ -1,13 +1,15 @@
 # The published terms the feed form speaks that ikigai-vocab does not already know, restated
 # from their own specifications (nothing here is minted by ikigai-feed). Dublin Core
 # (dc:, dcterms:), RDF and RDFS are well known and not repeated; DCMI's abstract model
-# (dcam:) is not, so its one term is.
+# (dcam:) is not, so its one term is, and neither are the IANA link relations the form writes
+# (ikigai_feed::RELATIONS).
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix rss: <http://purl.org/rss/1.0/> .
 @prefix content: <http://purl.org/rss/1.0/modules/content/> .
 @prefix dcam: <http://purl.org/dc/dcam/> .
 @prefix enc: <http://purl.oclc.org/net/rss_2.0/enc#> .
+@prefix iana: <http://www.iana.org/assignments/relation/> .
 
 # RDF Site Summary (RSS) 1.0, https://web.resource.org/rss/1.0/spec
 rss:channel a rdfs:Class ; rdfs:label "Channel" ;
@@ -46,3 +48,48 @@ enc:length a rdf:Property ; rdfs:label "Length" ;
 dcam:memberOf a rdf:Property ; rdfs:label "Member Of" ;
     rdfs:comment "A relationship between a resource and a vocabulary encoding scheme which indicates that the resource is a member of a set." ;
     rdfs:isDefinedBy <http://purl.org/dc/dcam/> .
+
+# Link Relations, the IANA registry (RFC 8288); RFC 4287 section 4.2.7.2 names a registered
+# relation by this IRI. https://www.iana.org/assignments/link-relations/
+iana:alternate a rdf:Property ; rdfs:label "Alternate" ;
+    rdfs:comment "Refers to a substitute for this context. (RFC 4287)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .
+iana:self a rdf:Property ; rdfs:label "Self" ;
+    rdfs:comment "Conveys an identifier for the link's context. (RFC 4287)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .
+iana:replies a rdf:Property ; rdfs:label "Replies" ;
+    rdfs:comment "Identifies a resource that is a reply to the context of the link. (RFC 4685)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .
+iana:license a rdf:Property ; rdfs:label "License" ;
+    rdfs:comment "Refers to a license associated with this context. (RFC 4946)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .
+iana:edit a rdf:Property ; rdfs:label "Edit" ;
+    rdfs:comment "Refers to a resource that can be used to edit the link's context. (RFC 5023)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .
+iana:edit-media a rdf:Property ; rdfs:label "Edit media" ;
+    rdfs:comment "Refers to a resource that can be used to edit media associated with the link's context. (RFC 5023)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .
+iana:first a rdf:Property ; rdfs:label "First" ;
+    rdfs:comment "An IRI that refers to the furthest preceding resource in a series of resources. (RFC 8288)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .
+iana:last a rdf:Property ; rdfs:label "Last" ;
+    rdfs:comment "An IRI that refers to the furthest following resource in a series of resources. (RFC 8288)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .
+iana:next a rdf:Property ; rdfs:label "Next" ;
+    rdfs:comment "Indicates that the link's context is a part of a series, and that the next in the series is the link target. (HTML)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .
+iana:previous a rdf:Property ; rdfs:label "Previous" ;
+    rdfs:comment "Refers to the previous resource in an ordered series of resources. Synonym for prev. (RFC 8288)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .
+iana:prev a rdf:Property ; rdfs:label "Prev" ;
+    rdfs:comment "Indicates that the link's context is a part of a series, and that the previous in the series is the link target. (HTML)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .
+iana:hub a rdf:Property ; rdfs:label "Hub" ;
+    rdfs:comment "Refers to a hub that enables registration for notification of updates to the context. (WebSub)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .
+iana:payment a rdf:Property ; rdfs:label "Payment" ;
+    rdfs:comment "Indicates a resource where payment is accepted. (RFC 8288)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .
+iana:describedby a rdf:Property ; rdfs:label "Described by" ;
+    rdfs:comment "Refers to a resource providing information about the link's context. (POWDER)" ;
+    rdfs:isDefinedBy <https://www.iana.org/assignments/link-relations/> .

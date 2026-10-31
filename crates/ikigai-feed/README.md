@@ -10,8 +10,8 @@ source urn:http:get url=https://example.org/feed.xml | urn:iki:feed:graph base=h
 
 Parsing is [feed-rs](https://crates.io/crates/feed-rs) 3 (MIT; Atom, RSS 0.9x/1.0/2.0 into one
 model, both date formats). This crate is the **mapping** from feed-rs's model to the form,
-plus a bounding pre-scan (below) that also recovers the three things feed-rs's model drops and
-the form needs.
+plus a bounding pre-scan (below) that also recovers what feed-rs's model drops and the form
+needs.
 
 ## The resource
 
@@ -44,8 +44,10 @@ RDF already. When only this space is bound, RDF/XML that has no RSS 1.0 channel 
 
 One vocabulary, all published: RSS 1.0 (`rss:`) and its content (`content:`) and enclosure
 (`enc:`) modules, Dublin Core (`dc:`, `dcterms:`) and DCMI's abstract model (`dcam:`), with
-`rdf:value` and `rdfs:label`. ikigai-feed mints no term. `ikigai_feed::VOCABULARY` restates
-the published definitions of the terms that ikigai-vocab does not already know.
+`rdf:value`, `rdfs:label` and `skos:broader`, and the IANA link relations (`iana:`) that
+[RFC 4287](https://www.rfc-editor.org/rfc/rfc4287#section-4.2.7.2) names a registered `rel` by.
+ikigai-feed mints no term. `ikigai_feed::VOCABULARY` restates the published definitions of the
+terms that ikigai-vocab does not already know, `ikigai_feed::RELATIONS` among them.
 
 ```turtle
 @prefix rss:     <http://purl.org/rss/1.0/> .
@@ -56,6 +58,8 @@ the published definitions of the terms that ikigai-vocab does not already know.
 @prefix dcam:    <http://purl.org/dc/dcam/> .
 @prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix iana:    <http://www.iana.org/assignments/relation/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
 ```
 
@@ -75,10 +79,17 @@ the published definitions of the terms that ikigai-vocab does not already know.
 | updated | `atom:updated`, `lastBuildDate` (channel) | | `updated` | `dcterms:modified` (`xsd:dateTime`), only when it differs from published |
 | language | `language` (channel) | `dc:language` | `xml:lang` | `dc:language`; on an item only when it differs from the channel's |
 | rights | `copyright` | `dc:rights` | `rights` | `dc:rights` |
-| category term | `category` | | `category/@term` | `dc:subject` (literal) and `dcterms:subject` → category node |
+| category term | `category` | `dc:subject` | `category/@term` | `dc:subject` (literal) and `dcterms:subject` → category node |
+| subcategory | `itunes:category` nested (channel) | | | its own category node, `skos:broader` → the parent's node; also a subject (below) |
 | enclosure | `enclosure`, `media:content` | | `link rel="enclosure"` | `enc:enclosure` → its URL; `enc:type`, `enc:length` (`xsd:integer`) on it |
 | via | | | `link rel="via"` | `dcterms:source` |
 | related | | | `link rel="related"` | `dcterms:relation` |
+| every alternate link | `link` | `link` | `link rel="alternate"` or no `rel` (each, not only the first) | `iana:alternate` → its URL |
+| comments | `comments` | | `wfw:commentRss` | `iana:replies` → its URL |
+| other links | `atom:link` (any `rel`) | | `link` with any other `rel` | `iana:{rel}` → its URL for a rel in `RELATIONS` (`self`, `license`, `hub`, `edit`, `next`, …); `dcterms:relation` for any other (an extension IRI, an unregistered name) |
+| a link's `type`, `hreflang`, `title` | | | on `link` | on the link's URL: `dcterms:format`, `dcterms:language`, `dcterms:title` (an enclosure's type stays `enc:type`) |
+| content stored outside the feed | | | `content/@src` | `dcterms:hasFormat` → the src; `dcterms:format` its `type` |
+| the feed an item was copied from | `source/@url` | | `source` (its `link rel="self"`, else its `id`, else its alternate link) | `dcterms:source` → that IRI |
 
 `dc:date`, `dc:subject` and the literal `rss:link` are the shape the
 [ikigai Book's](https://github.com/ikigai-rs/ikigai-tutorial) RSS example writes. `tests/river.rs`
@@ -110,6 +121,7 @@ U+0000 (no XML text can contain U+0000):
 | `item` | channel IRI, title, date (`xsd:dateTime` lexical form, or empty) | an item with no IRI of its own |
 | `channel` | title | a channel with no IRI of its own |
 | `category` | scheme (as written, or empty), term | a category node |
+| `subcategory` | the parent's node IRI, term | a subcategory node (so one term under two parents is two nodes) |
 | `scheme` | the scheme's text | a scheme that is not an absolute IRI |
 
 ### Dates
@@ -117,7 +129,8 @@ U+0000 (no XML text can contain U+0000):
 Every date is an `xsd:dateTime` in UTC (`2026-10-07T17:00:00Z`). feed-rs parses RFC 3339
 (Atom, RSS 1.0's W3CDTF) and RFC 5322 (RSS 2.0), including the zone names RSS writers use
 (`GMT`, `UT`, `EST`/`EDT`, `CST`/`CDT`, `MST`/`MDT`, `PST`/`PDT`). The written offset is
-normalized away: the instant is kept, the zone it was written in is not. Published and updated
+normalized away: the instant is kept, the zone it was written in is not (on purpose; see
+"Date offsets" below). Published and updated
 dates stay separate when the source gives both. feed-rs copies an RSS `pubDate` into "updated"
 when nothing updated the item, so `dcterms:modified` is written only when it differs from
 `dcterms:issued`. A date that does not parse is dropped.
@@ -136,8 +149,26 @@ feeds, or from RSS and Atom, is one node:
 ```
 
 A scheme that is not an absolute IRI (an RSS `domain="Syndic8"`) becomes a node named by
-digest of its text, with `rdfs:label` the text. This mapping does not create SKOS concepts. A
-separate mapping resource can turn these nodes into SKOS concepts (ledger #2623).
+digest of its text, with `rdfs:label` the text.
+
+**Hierarchies.** A subcategory (feed-rs's `subcategories`: iTunes nests `itunes:category`) is
+a node of its own, named by digest of its parent's node and its term, with `skos:broader` its
+parent's node, so the Topics-style closure (`skos:broaderTransitive`, or the path
+`skos:broader+`) runs over feed categories:
+
+```turtle
+<channel> dc:subject "Technology" , "Podcasting" ;
+          dcterms:subject <nih:…technology> , <nih:…podcasting> .
+<nih:…podcasting> rdf:value "Podcasting" ; skos:broader <nih:…technology> .
+```
+
+**The parents are subjects too.** Every level is a `dc:subject` / `dcterms:subject` of the
+item or channel: iTunes lists a show in the parent category as well as the child, and the
+parent was already a subject before hierarchies were read, so leaving it out would have removed
+triples. RSS 2.0's slash-separated `category` text (`a/b/c`) is not split: the spec leaves the
+convention to processors, and `TCP/IP` is a tag, not a path. RSS 1.0's `dc:subject` is a
+category with no scheme. The lift writes `skos:broader` and no `skos:Concept` typing. A separate
+mapping resource can make these nodes full SKOS concepts (ledger #2623).
 
 ### Worked example
 
@@ -267,27 +298,66 @@ WHERE { ?item a rss:item ; rss:title ?title . FILTER(STRSTARTS(?title, "Quoting 
 
 ## What feed-rs loses, and what is recovered
 
-The pre-scan reads attributes only, never text. It recovers three things that feed-rs's model
-drops:
+Each loss sorted by where its data is (ledger #2672):
+
+| loss | where the data is | recovered by |
+| --- | --- | --- |
+| every link after the first alternate; `hreflang`, `title` on links | in feed-rs's model (`Entry::links`, `Link::href_lang`, `Link::title`) | the lift |
+| Atom `content/@src` | in feed-rs's model (`Content::src`) | the lift. feed-rs leaves the href as written, with no `xml:base` applied, so a relative src is dropped, not guessed at. For RSS, feed-rs puts `content:encoded`'s `xml:base` in the same field, so the field is read for Atom only |
+| category hierarchies | in feed-rs's model (`Category::subcategories`) | the lift |
+| `atom:source`, RSS 2.0 `source/@url` | dropped by feed-rs (`Entry::source` exists but no parser fills it) | the pre-scan: the source's `link` attributes and the text of its `atom:id` |
+| RSS 1.0 `dc:subject` | element text feed-rs does not model | the pre-scan (below) |
+| the offset a date was written in | feed-rs's model holds `DateTime<Utc>` | not recovered, on purpose (below) |
+| extension namespaces | outside feed-rs's model | not recovered: the raw feed stays addressable on its golden thread |
+
+The pre-scan reads attributes, and the text of exactly two elements at fixed places: RSS 1.0's
+`dc:subject` (a child of the channel or an item) and `atom:source/atom:id`. It recovers:
 
 - RSS 2.0 `guid/@isPermaLink`, which the IRI rule needs.
 - RSS 1.0 `rdf:about` on the channel and on each item.
 - `xml:lang` (the Atom feed's, or an entry's own).
+- An entry's source feed: Atom's `atom:source` (its `link rel="self"`, its `atom:id`, its
+  alternate link) and RSS 2.0's `source/@url`. Only an absolute IRI is used.
+- RSS 1.0 `dc:subject`, trimmed, with entities and CDATA resolved. Empty text is no subject.
+
+RSS 1.0 `dc:subject` is read in the pre-scan, not by an upstream feed-rs change, because the
+read is a dozen lines at one fixed place, interprets nothing (the text is the term, as written)
+and ships now. The right long-term home is still feed-rs: a patch to its RSS 1.0 parser
+reading `dc:subject` into `Entry::categories`, after which this read can go.
 
 It identifies entries the way feed-rs does, by the root's local name, with entries as children
 of the root or of its channel. If the two counts ever disagree, the scan's findings are not
-used.
+used. Its kept text is bounded by the feed's own size bound, and its depth by `MAX_FEED_DEPTH`.
+
+### Date offsets
+
+The written offset stays normalized away, and `dc:date`, `dcterms:issued` and
+`dcterms:modified` stay in UTC:
+
+- **One instant is one term.** `"2026-10-07T10:00:00-07:00"^^xsd:dateTime` and
+  `"2026-10-07T17:00:00Z"^^xsd:dateTime` are equal values but different RDF terms. SPARQL
+  orders and compares them as instants, but set operations are by term: the union of two graphs,
+  `urn:rdf:diff` (the mapping lint), and the property that one item written as RSS 2.0 and as
+  Atom lifts to the same triples. UTC makes the same instant the same term everywhere.
+- **Digest IRIs hang on it.** An item with no IRI of its own is named by digest over its date's
+  lexical form. Keeping offsets would rename every such item that is not written in UTC.
+- **Recovering it means reparsing.** feed-rs's model holds `DateTime<Utc>`. Getting the offset
+  back means either an upstream API change, or the pre-scan reparsing every date, which would
+  reimplement feed-rs's lenient RFC 5322 parsing.
+
+The form does not change, so there is nothing to note for the next release.
 
 Still lost, and worth having back later:
 
-- The offset a date was written in. Only the instant survives.
-- RSS 1.0 `dc:subject` on items. feed-rs reads no categories in RSS 1.0.
-- `atom:source`.
-- Atom `content/@src` (content stored outside the feed).
-- Every alternate link after the first.
-- `hreflang` and `title` on links.
-- Category hierarchies (feed-rs's `subcategories`, from iTunes).
-- Extension namespaces outside feed-rs's model.
+- The offset a date was written in. Only the instant survives (above).
+- A link relation outside `RELATIONS` (an extension IRI, an unregistered name): the link is
+  kept, as `dcterms:relation`, but its relation is not.
+- A relative Atom `content/@src` (feed-rs leaves `xml:base` unapplied to it).
+- iTunes, podcast and MediaRSS detail that feed-rs already models (`MediaObject`'s duration,
+  thumbnails, credits, transcripts, season and episode): mappable in the lift like the
+  above, once published terms are chosen for them.
+- Extension namespaces outside feed-rs's model. The raw feed stays addressable on its
+  golden thread, and the form is declared lossy.
 
 ## wasm
 
