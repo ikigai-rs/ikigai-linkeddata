@@ -28,6 +28,8 @@ sha2 = "0.10"
 [dev-dependencies]
 futures = "0.3"
 ikigai-conformance = "0.12.0"
+# tests/mapped.rs mounts a config-home root as a host does: mappings are files it serves.
+ikigai-fs = "0.3"
 # tests/river.rs runs the Book's river query over the form. `rdf-12` because sibling test
 # builds turn oxrdf's on, and an rdf-12 oxrdf builds spargebra only with it (ikigai-reason's note).
 ikigai-sparql = { path = "../ikigai-sparql", features = ["rdf-12"] }
