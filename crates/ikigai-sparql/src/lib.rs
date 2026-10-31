@@ -522,7 +522,7 @@ impl Endpoint for SparqlEndpoint {
             })?;
         }
 
-        let (media, bytes) = query_within_budget(
+        let answered = query_within_budget(
             query_str,
             &bound,
             &store,
@@ -530,7 +530,12 @@ impl Endpoint for SparqlEndpoint {
             budget,
             answer,
             Some(&labels),
-        )?;
+        );
+        // A refusal by size is as cacheable as the answer would have been, and costs as much:
+        // it is cached until a source's thread is cut, for at most `TOO_LARGE_EXPIRY` (ledger
+        // #2681). The shared store above states none: nothing would cut it.
+        budget::expire_too_large(inv, &answered);
+        let (media, bytes) = answered?;
         Ok(Representation::new(utf8_repr(&media), bytes).cacheable())
     }
 
@@ -2810,6 +2815,183 @@ mod tests {
                     other => panic!("{which} {iri} with non-UTF-8 `query`: expected InvalidArgument, got {other:?}"),
                 }
             }
+        }
+    }
+
+    /// A refusal by SIZE over a per-query dataset states a failure expiry (ledger #2681), so
+    /// the kernel serves it again instead of recomputing it: a full-river SELECT refused at the
+    /// 16 MiB bound cost 5.8 s on EVERY read before this (scale round 2026-10-30, F2). The
+    /// cached refusal hangs from the `graph=` sources' threads, so a cut of one drops it, and it
+    /// is served for at most [`budget::TOO_LARGE_EXPIRY`].
+    mod failure_expiry {
+        use super::super::*;
+        use futures::executor::block_on;
+        use ikigai_core::{Capability, Clock, Kernel, Time};
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+        /// Counts the invocations of the endpoint it wraps, so a cache hit is observable.
+        struct Counted<E>(E, Arc<AtomicUsize>);
+
+        #[async_trait]
+        impl<E: Endpoint> Endpoint for Counted<E> {
+            async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                self.0.invoke(inv).await
+            }
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            fn describe(&self) -> Description {
+                self.0.describe()
+            }
+        }
+
+        /// A cacheable Turtle source of three subjects: its answer, and so a query's, hangs
+        /// from the thread named after it.
+        struct River;
+
+        #[async_trait]
+        impl Endpoint for River {
+            async fn invoke(&self, _inv: &Invocation<'_>) -> Result<Representation> {
+                let ttl = "<urn:a> <urn:p> 1 . <urn:b> <urn:p> 2 . <urn:c> <urn:p> 3 .";
+                Ok(
+                    Representation::new(ReprType::new("text/turtle"), ttl.as_bytes().to_vec())
+                        .cacheable(),
+                )
+            }
+            fn name(&self) -> &str {
+                "river"
+            }
+            fn describe(&self) -> Description {
+                Description::new("river").verb(Verb::Source)
+            }
+        }
+
+        /// A clock a test moves.
+        struct Moving(AtomicU64);
+
+        impl Clock for Moving {
+            fn now(&self) -> Time {
+                Time::from_millis(self.0.load(Ordering::SeqCst))
+            }
+        }
+
+        fn endpoint(shared: Option<Arc<Store>>) -> SparqlEndpoint {
+            SparqlEndpoint {
+                verb: "select",
+                id: "sparql-select",
+                shared,
+                ceiling: Duration::from_secs(60),
+                answer: budget::AnswerBound::DEFAULT,
+            }
+        }
+
+        fn kernel(
+            shared: Option<Arc<Store>>,
+            calls: &Arc<AtomicUsize>,
+            clock: &Arc<Moving>,
+        ) -> Kernel {
+            let space = EndpointSpace::new()
+                .bind(
+                    Exact::new("urn:sparql:select"),
+                    Counted(endpoint(shared), Arc::clone(calls)),
+                )
+                .bind(Exact::new("urn:test:river"), River);
+            Kernel::new(Arc::new(space)).with_clock(Arc::clone(clock) as Arc<dyn Clock>)
+        }
+
+        fn select(kernel: &Kernel, args: &[(&str, &str)]) -> Result<Representation> {
+            let request = args.iter().fold(
+                Request::new(Verb::Source, Iri::parse("urn:sparql:select").unwrap()),
+                |req, (name, value)| req.with_arg(*name, ArgRef::Inline(value.as_bytes().to_vec())),
+            );
+            block_on(kernel.issue(request, &Capability::root()))
+        }
+
+        const RIVER: [(&str, &str); 3] = [
+            ("query", "SELECT * { GRAPH <urn:test:river> { ?s ?p ?o } }"),
+            ("graph", "urn:test:river"),
+            ("max_rows", "2"),
+        ];
+
+        fn assert_too_large(outcome: Result<Representation>) {
+            match outcome {
+                Err(error) => assert!(budget::is_too_large(&error), "{error:?}"),
+                Ok(rep) => panic!("expected a refusal by size, got {} bytes", rep.bytes.len()),
+            }
+        }
+
+        #[test]
+        fn a_refusal_by_size_is_served_again_until_a_cut_or_its_expiry() {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let clock = Arc::new(Moving(AtomicU64::new(1_000)));
+            let kernel = kernel(None, &calls, &clock);
+            assert_too_large(select(&kernel, &RIVER));
+            assert_too_large(select(&kernel, &RIVER));
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "the second read recomputed"
+            );
+
+            // A cut of the `graph=` source's thread drops the cached refusal.
+            kernel.cut("urn:test:river");
+            assert_too_large(select(&kernel, &RIVER));
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                2,
+                "the cut did not drop the refusal"
+            );
+            assert_too_large(select(&kernel, &RIVER));
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+            // Bounded: just inside the expiry it is still served, at it it recomputes.
+            let expiry = budget::TOO_LARGE_EXPIRY.as_millis() as u64;
+            clock.0.fetch_add(expiry - 1, Ordering::SeqCst);
+            assert_too_large(select(&kernel, &RIVER));
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            clock.0.fetch_add(1, Ordering::SeqCst);
+            assert_too_large(select(&kernel, &RIVER));
+            assert_eq!(calls.load(Ordering::SeqCst), 3, "served past its expiry");
+
+            // The bound is in the key: a request that allows the rows is answered.
+            let rows = [RIVER[0], RIVER[1], ("max_rows", "3")];
+            assert!(select(&kernel, &rows).is_ok());
+            // The byte bound's refusal is cached the same way.
+            let bytes = [RIVER[0], RIVER[1], ("max_bytes", "64")];
+            assert_too_large(select(&kernel, &bytes));
+            assert_too_large(select(&kernel, &bytes));
+            assert_eq!(calls.load(Ordering::SeqCst), 5);
+        }
+
+        /// A shared store's writes through its raw handle cut no thread, so nothing could drop
+        /// a cached refusal over it when the store shrinks: its refusals state no expiry.
+        #[test]
+        fn a_refusal_by_size_over_a_shared_store_is_never_cached() {
+            let store = Arc::new(Store::new().unwrap());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let clock = Arc::new(Moving(AtomicU64::new(1_000)));
+            let kernel = kernel(Some(store), &calls, &clock);
+            // The vocabulary is not loaded into a shared store; VALUES makes the rows.
+            let args = [
+                ("query", "SELECT * { VALUES ?v { 1 2 3 } }"),
+                ("max_rows", "2"),
+            ];
+            assert_too_large(select(&kernel, &args));
+            assert_too_large(select(&kernel, &args));
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        }
+
+        /// Other refusals are not cached by this: an algebra bound costs nothing to recompute.
+        #[test]
+        fn a_refusal_that_is_not_by_size_states_no_expiry() {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let clock = Arc::new(Moving(AtomicU64::new(1_000)));
+            let kernel = kernel(None, &calls, &clock);
+            let args = [("query", "SELECT * { ?s ?p }"), ("graph", "urn:test:river")];
+            assert!(select(&kernel, &args).is_err());
+            assert!(select(&kernel, &args).is_err());
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
         }
     }
 }
