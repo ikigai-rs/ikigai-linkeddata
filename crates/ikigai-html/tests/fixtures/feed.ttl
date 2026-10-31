@@ -1,0 +1,16 @@
+@prefix rss: <http://purl.org/rss/1.0/> .
+@prefix content: <http://purl.org/rss/1.0/modules/content/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+<https://example.org/posts/1> a rss:item ;
+    rss:title "One" ;
+    rss:description "<p>Summary of <b>one</b></p>" ;
+    content:encoded """<blockquote cite="https://example.org/quoted/1"><p>first</p></blockquote>
+<p class="cite"><a href="https://example.org/by/1">Ada</a></p>""" .
+
+<https://example.org/posts/2> a rss:item ;
+    rss:title "Two" ;
+    content:encoded "<blockquote cite=\"https://example.org/quoted/2\">second</blockquote><p class=\"cite\"><a href=\"https://example.org/by/2\">Grace</a></p>"^^rdf:HTML .
+
+<https://example.org/posts/3> a rss:item ;
+    rss:title "Three, no content" .
