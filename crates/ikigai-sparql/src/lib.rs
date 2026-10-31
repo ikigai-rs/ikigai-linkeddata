@@ -87,7 +87,7 @@ use ikigai_core::{
 };
 use ikigai_rdf::{canonical_triples, BlankNodeLabels};
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
-use oxigraph::model::{GraphName, NamedNodeRef, Term, Variable};
+use oxigraph::model::{GraphName, NamedNodeRef, Quad, Term, Variable};
 use oxigraph::sparql::results::{QueryResultsFormat, QueryResultsSerializer};
 use oxigraph::sparql::{CancellationToken, QueryResults};
 use spargebra::SparqlParser;
@@ -421,6 +421,38 @@ fn load_relabeled(
     store.extend(quads).map_err(|e| e.to_string())
 }
 
+/// Copy every named graph's triples into the per-query `store`'s default graph, which is then
+/// the RDF merge of the vocabulary and the sources: a SET, so a triple two sources share is one
+/// triple of it (ledger #2715). [`evaluate`] queries it as the default graph of a query that
+/// states no dataset.
+///
+/// oxigraph's `set_default_graph_as_union` is a BAG: it scans every named graph's quads and
+/// drops only their graph names, so a triple in two sources matched twice, and a join through
+/// shared nodes (a feed's category node, a link target) multiplied its rows by every source that
+/// held each of them. Each source still loads as its own named graph, so `GRAPH <g>` and
+/// `GRAPH ?g` see exactly what they did.
+///
+/// The cost: the store holds each distinct triple once more, and a pass over its quads.
+fn merge_into_default_graph(store: &Store) -> Result<()> {
+    let merged = store
+        .iter()
+        .map(|quad| {
+            quad.map(|quad| {
+                Quad::new(
+                    quad.subject,
+                    quad.predicate,
+                    quad.object,
+                    GraphName::DefaultGraph,
+                )
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| Error::Endpoint(format!("merging the sources: {e}")))?;
+    store
+        .extend(merged)
+        .map_err(|e| Error::Endpoint(format!("merging the sources: {e}")))
+}
+
 /// One SPARQL query form bound to `urn:sparql:{verb}`. Resolution is identical across all
 /// four (the query itself carries the form); only the *identity* differs — `id` is a
 /// UNIQUE description id (`sparql-select`/`…-ask`/`…-describe`/`…-construct`) so the catalog
@@ -494,11 +526,19 @@ impl Endpoint for SparqlEndpoint {
         let mut labels = BlankNodeLabels::new();
         let store = store_with_vocabulary(&mut labels)?;
         let mut sources = Vec::new();
+        // A source listed twice is the same source (ledger #2715): resolved and loaded once, in
+        // the order it first appears. Loaded again it would be a second document, whose blank
+        // nodes are relabeled apart from the first's, so each would count twice.
+        let mut listed: Vec<&str> = Vec::new();
         for uri in graph_list
             .split([',', ' ', '\n', '\t'])
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
+            if listed.contains(&uri) {
+                continue;
+            }
+            listed.push(uri);
             let (format, source) = parseable(inv, uri, resolve_graph(inv, uri).await?).await?;
             let graph = NamedNodeRef::new(uri)
                 .map_err(|e| Error::Endpoint(format!("graph name `{uri}` is not an IRI: {e}")))?;
@@ -521,6 +561,7 @@ impl Endpoint for SparqlEndpoint {
                 Ok(())
             })?;
         }
+        merge_into_default_graph(&store)?;
 
         let answered = query_within_budget(
             query_str,
@@ -1112,8 +1153,10 @@ fn evaluate<'a>(
     };
     let mut prepared = evaluator.for_query(query);
     // `for_query` seeds the dataset from the query's own FROM / FROM NAMED, so the union is
-    // the right default only when there were none.
-    if prepared.dataset().is_default_dataset() {
+    // the right default only when there were none. The per-query store's own default graph
+    // already IS the union, as a set (see `merge_into_default_graph`); oxigraph's union is a
+    // bag, so it stays only over a shared store, whose default graph is the caller's own.
+    if !per_query && prepared.dataset().is_default_dataset() {
         prepared.dataset_mut().set_default_graph_as_union();
     }
     // After the union: the list would make the dataset read as stated. A query's own

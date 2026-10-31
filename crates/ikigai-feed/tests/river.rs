@@ -34,8 +34,9 @@ fn request(iri: &str, args: &[(&str, &[u8])]) -> Request {
     )
 }
 
-#[test]
-fn the_books_river_query_reads_every_syntax() {
+/// A kernel serving the three fixtures' lifted form as `urn:test:{rss2,rss1,atom}`, beside the
+/// SPARQL doors.
+fn kernel() -> Kernel {
     let feeds = Kernel::new(Arc::new(ikigai_feed::space()));
     let mut graphs = EndpointSpace::new();
     for name in ["rss2", "rss1", "atom"] {
@@ -50,31 +51,52 @@ fn the_books_river_query_reads_every_syntax() {
         ))
         .unwrap()
         .bytes;
-        graphs = graphs.bind(
-            Exact::new(format!("urn:test:{name}")),
-            FnEndpoint::new("fixture", move |_| {
-                Ok(Representation::new(ReprType::new("text/turtle"), turtle.clone()).cacheable())
-            }),
-        );
+        // Atom's again under a second name, for a merge of two sources holding the same triples.
+        let names = if name == "atom" {
+            &["atom", "atom-again"][..]
+        } else {
+            &[name][..]
+        };
+        for name in names {
+            let turtle = turtle.clone();
+            graphs = graphs.bind(
+                Exact::new(format!("urn:test:{name}")),
+                FnEndpoint::new("fixture", move |_| {
+                    Ok(
+                        Representation::new(ReprType::new("text/turtle"), turtle.clone())
+                            .cacheable(),
+                    )
+                }),
+            );
+        }
     }
-    let kernel = Kernel::new(Arc::new(Fallback::new(vec![
+    Kernel::new(Arc::new(Fallback::new(vec![
         Arc::new(graphs),
         Arc::new(ikigai_sparql::space()),
         Arc::new(ikigai_rdf::space()),
-    ])));
-    let csv = block_on(kernel.issue(
+    ])))
+}
+
+/// `query` over the sources `graph` lists, as CSV.
+fn select(query: &str, graph: &str) -> String {
+    let csv = block_on(kernel().issue(
         request(
             "urn:sparql:select",
             &[
-                ("query", RIVER.as_bytes()),
-                ("graph", b"urn:test:rss2,urn:test:rss1,urn:test:atom"),
+                ("query", query.as_bytes()),
+                ("graph", graph.as_bytes()),
                 ("as", b"text/csv"),
             ],
         ),
         &Capability::root(),
     ))
     .unwrap();
-    let csv = String::from_utf8(csv.bytes).unwrap();
+    String::from_utf8(csv.bytes).unwrap()
+}
+
+#[test]
+fn the_books_river_query_reads_every_syntax() {
+    let csv = select(RIVER, "urn:test:rss2,urn:test:rss1,urn:test:atom");
     let rows: Vec<&str> = csv.lines().skip(1).collect();
     // Every item with a link, from all three syntaxes: six of RSS 2.0's seven (one has no
     // link, which the river requires), both of RSS 1.0's, both of Atom's.
@@ -112,4 +134,24 @@ fn row_link(row: &str) -> &str {
         .skip(1)
         .find(|f| f.starts_with("http"))
         .unwrap_or("")
+}
+
+/// A feed listed twice is the same feed (ledger #2715): the river and a COUNT over the merge are
+/// what they are with each feed listed once, not a row per listing.
+#[test]
+fn a_feed_listed_twice_changes_neither_the_river_nor_a_count() {
+    let once = "urn:test:rss2,urn:test:rss1,urn:test:atom";
+    let twice = "urn:test:rss2,urn:test:rss1,urn:test:atom,urn:test:atom urn:test:rss2";
+    assert_eq!(select(RIVER, twice), select(RIVER, once));
+    let count = "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }";
+    assert_eq!(select(count, twice), select(count, once));
+    let items = "PREFIX rss: <http://purl.org/rss/1.0/> \
+                 SELECT (COUNT(*) AS ?n) WHERE { ?item a rss:item }";
+    assert_eq!(select(items, twice), select(items, once));
+    // The same feed under two names is two sources holding the same triples: their merge holds
+    // each once, so the river is the one feed's.
+    assert_eq!(
+        select(RIVER, "urn:test:atom,urn:test:atom-again"),
+        select(RIVER, "urn:test:atom")
+    );
 }
