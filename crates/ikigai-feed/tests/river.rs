@@ -79,24 +79,37 @@ fn the_books_river_query_reads_every_syntax() {
     // Every item with a link, from all three syntaxes: six of RSS 2.0's seven (one has no
     // link, which the river requires), both of RSS 1.0's, both of Atom's.
     assert_eq!(rows.len(), 10, "{csv}");
+    // Items are named within their feed (ledger #2707), so a row is found by its link.
     for expected in [
-        "http://feeds.example.org/posts/a,",
-        "http://rdf.example.org/items/1,",
-        "tag:atom.example.org,2026:entry-1,",
+        "http://feeds.example.org/posts/a.html",
+        "http://rdf.example.org/items/1.html",
+        "http://atom.example.org/blog/posts/1",
     ] {
         assert!(
-            rows.iter().any(|r| r.starts_with(expected)),
+            rows.iter().any(|r| row_link(r) == expected),
             "{expected}: {csv}"
         );
     }
     // Newest first across syntaxes, on dc:date: RSS 2.0's 07:30Z on the 8th (written +0200)
     // before Atom's midnight on the 8th, before the three items of the 7th.
-    assert!(
-        rows[0].starts_with("http://feeds.example.org/posts/b,"),
+    assert_eq!(
+        row_link(rows[0]),
+        "http://feeds.example.org/posts/b",
         "{csv}"
     );
-    assert!(
-        rows[1].starts_with("http://atom.example.org/blog/posts/2,"),
+    assert_eq!(
+        row_link(rows[1]),
+        "http://atom.example.org/blog/posts/2",
         "{csv}"
     );
+    // Every item is named by digest within its feed, none by an IRI a feed wrote.
+    assert!(rows.iter().all(|r| r.starts_with("nih:sha-256;")), "{csv}");
+}
+
+/// A row's `?link`: the first `http` field after the item (no fixture title holds one).
+fn row_link(row: &str) -> &str {
+    row.split(',')
+        .skip(1)
+        .find(|f| f.starts_with("http"))
+        .unwrap_or("")
 }

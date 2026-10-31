@@ -116,6 +116,11 @@ fn digest(kind: &str, parts: &[&str]) -> String {
     format!("nih:sha-256;{hex}")
 }
 
+/// An item's IRI: the digest of its channel's IRI and its key (its own IRI, guid or link).
+fn item(channel: &str, key: &str) -> String {
+    digest("item", &[channel, key])
+}
+
 #[test]
 fn no_fixture_lifts_a_blank_node() {
     for name in [
@@ -146,30 +151,29 @@ fn rss2_item_iris_follow_the_rule_branch_by_branch() {
         "item",
         &[channel, "No link and no guid", "2026-10-09T08:00:00Z"],
     );
-    assert_eq!(
-        items(&g),
-        vec![
-            // xml:base on the item resolves its relative link (step 3).
-            "http://feeds.example.org/archive/g.html".to_string(),
-            // isPermaLink="true": the guid, not the link (step 2).
-            "http://feeds.example.org/posts/a".into(),
-            // isPermaLink="false": never the guid; the link (step 3).
-            "http://feeds.example.org/posts/b".into(),
-            // No isPermaLink, the guid an absolute IRI: the guid, not the link (step 2).
-            "http://feeds.example.org/posts/c".into(),
-            // No isPermaLink, the guid no IRI: the link (step 3).
-            "http://feeds.example.org/posts/d".into(),
-            // isPermaLink="false" though the guid IS an absolute IRI: the link (step 3).
-            "http://feeds.example.org/posts/f".into(),
-            // No guid, no link: the digest of channel, title and date (step 4).
-            no_link.clone(),
-        ]
-    );
+    let mut expected = vec![
+        // xml:base on the item resolves its relative link (step 3).
+        item(channel, "http://feeds.example.org/archive/g.html"),
+        // isPermaLink="true": the guid, not the link (step 2).
+        item(channel, "http://feeds.example.org/posts/a"),
+        // isPermaLink="false": never the guid; the link (step 3).
+        item(channel, "http://feeds.example.org/posts/b"),
+        // No isPermaLink, the guid an absolute IRI: the guid, not the link (step 2).
+        item(channel, "http://feeds.example.org/posts/c"),
+        // No isPermaLink, the guid no IRI: the link (step 3).
+        item(channel, "http://feeds.example.org/posts/d"),
+        // isPermaLink="false" though the guid IS an absolute IRI: the link (step 3).
+        item(channel, "http://feeds.example.org/posts/f"),
+        // No guid, no link: the digest of channel, title and date (step 4).
+        no_link.clone(),
+    ];
+    expected.sort();
+    assert_eq!(items(&g), expected);
     // The guid is kept as written, whatever named the item.
     assert_eq!(
         objects(
             &g,
-            "http://feeds.example.org/posts/b",
+            &item(channel, "http://feeds.example.org/posts/b"),
             &format!("{DC}identifier")
         ),
         vec![lit("post-b-0001")]
@@ -177,7 +181,7 @@ fn rss2_item_iris_follow_the_rule_branch_by_branch() {
     assert_eq!(
         objects(
             &g,
-            "http://feeds.example.org/posts/f",
+            &item(channel, "http://feeds.example.org/posts/f"),
             &format!("{DC}identifier")
         ),
         vec![lit("http://feeds.example.org/guids/f")]
@@ -191,33 +195,33 @@ fn rss2_item_iris_follow_the_rule_branch_by_branch() {
 }
 
 #[test]
-fn atom_and_rss1_items_are_named_by_their_own_iri() {
+fn atom_and_rss1_items_are_keyed_by_their_own_iri() {
     let g = graph(&fixture("atom.xml"), None);
-    assert_eq!(
-        items(&g),
-        vec![
-            // An atom:id that is not an absolute IRI falls to the link, resolved under xml:base.
-            "http://atom.example.org/blog/posts/2".to_string(),
-            // atom:id (step 1).
-            "tag:atom.example.org,2026:entry-1".into(),
-        ]
-    );
+    let channel = "http://atom.example.org/blog/feed.atom";
+    let mut expected = vec![
+        // An atom:id that is not an absolute IRI falls to the link, resolved under xml:base.
+        item(channel, "http://atom.example.org/blog/posts/2"),
+        // atom:id (step 1).
+        item(channel, "tag:atom.example.org,2026:entry-1"),
+    ];
+    expected.sort();
+    assert_eq!(items(&g), expected);
     let g = graph(&fixture("rss1.xml"), None);
+    let channel = "http://rdf.example.org/index.rdf";
     // rdf:about (step 1): not the item's link, which differs.
-    assert_eq!(
-        items(&g),
-        vec![
-            "http://rdf.example.org/items/1".to_string(),
-            "http://rdf.example.org/items/2".into()
-        ]
-    );
+    let mut expected = vec![
+        item(channel, "http://rdf.example.org/items/1"),
+        item(channel, "http://rdf.example.org/items/2"),
+    ];
+    expected.sort();
+    assert_eq!(items(&g), expected);
     assert_eq!(
         objects(
             &g,
-            "http://rdf.example.org/items/1",
+            &item(channel, "http://rdf.example.org/items/1"),
             &format!("{DCTERMS}isPartOf")
         ),
-        vec![Term::from(iri("http://rdf.example.org/index.rdf"))]
+        vec![Term::from(iri(channel))]
     );
 }
 
@@ -246,7 +250,10 @@ fn base_names_the_channel_and_resolves_relative_links() {
     let g = graph(body, Some("http://base.example.org/feeds/main.xml"));
     assert_eq!(
         items(&g),
-        vec!["http://base.example.org/feeds/posts/x".to_string()]
+        vec![item(
+            "http://base.example.org/feeds/main.xml",
+            "http://base.example.org/feeds/posts/x"
+        )]
     );
     assert_eq!(
         objects(
@@ -262,7 +269,7 @@ fn base_names_the_channel_and_resolves_relative_links() {
 fn atom_xml_base_resolves_links_enclosures_and_self() {
     let g = graph(&fixture("atom.xml"), None);
     let channel = "http://atom.example.org/blog/feed.atom";
-    let entry = "tag:atom.example.org,2026:entry-1";
+    let entry = &item(channel, "tag:atom.example.org,2026:entry-1");
     assert_eq!(
         objects(&g, channel, &format!("{RSS}link")),
         vec![lit("http://atom.example.org/blog/")]
@@ -306,7 +313,7 @@ fn atom_xml_base_resolves_links_enclosures_and_self() {
     );
     assert!(objects(
         &g,
-        "http://atom.example.org/blog/posts/2",
+        &item(channel, "http://atom.example.org/blog/posts/2"),
         &format!("{DC}language")
     )
     .is_empty());
@@ -315,7 +322,8 @@ fn atom_xml_base_resolves_links_enclosures_and_self() {
 #[test]
 fn dates_are_xsd_date_times_from_both_formats() {
     let g = graph(&fixture("rss2.xml"), None);
-    let a = "http://feeds.example.org/posts/a";
+    let channel = "http://feeds.example.org/";
+    let a = &item(channel, "http://feeds.example.org/posts/a");
     // RFC 5322 with a zone NAME (PDT, UTC-7), as RSS writers write it.
     assert_eq!(
         objects(&g, a, &format!("{DC}date")),
@@ -327,14 +335,19 @@ fn dates_are_xsd_date_times_from_both_formats() {
     );
     // A numeric offset.
     assert_eq!(
-        objects(&g, "http://feeds.example.org/posts/b", &format!("{DC}date")),
+        objects(
+            &g,
+            &item(channel, "http://feeds.example.org/posts/b"),
+            &format!("{DC}date")
+        ),
         vec![date("2026-10-08T07:30:00Z")]
     );
     // Only a pubDate: nothing claims the item was modified.
     assert!(objects(&g, a, &format!("{DCTERMS}modified")).is_empty());
 
     let g = graph(&fixture("atom.xml"), None);
-    let entry = "tag:atom.example.org,2026:entry-1";
+    let channel = "http://atom.example.org/blog/feed.atom";
+    let entry = &item(channel, "tag:atom.example.org,2026:entry-1");
     // RFC 3339 with an offset; published and updated kept apart; dc:date the published one.
     assert_eq!(
         objects(&g, entry, &format!("{DCTERMS}issued")),
@@ -349,7 +362,7 @@ fn dates_are_xsd_date_times_from_both_formats() {
         vec![date("2026-10-07T17:00:00Z")]
     );
     // Only updated: dc:date is it.
-    let two = "http://atom.example.org/blog/posts/2";
+    let two = &item(channel, "http://atom.example.org/blog/posts/2");
     assert_eq!(
         objects(&g, two, &format!("{DC}date")),
         vec![date("2026-10-08T00:00:00Z")]
@@ -359,7 +372,14 @@ fn dates_are_xsd_date_times_from_both_formats() {
     // RSS 1.0's dc:date (W3CDTF).
     let g = graph(&fixture("rss1.xml"), None);
     assert_eq!(
-        objects(&g, "http://rdf.example.org/items/1", &format!("{DC}date")),
+        objects(
+            &g,
+            &item(
+                "http://rdf.example.org/index.rdf",
+                "http://rdf.example.org/items/1"
+            ),
+            &format!("{DC}date")
+        ),
         vec![date("2026-10-07T08:00:00Z")]
     );
 }
@@ -367,7 +387,10 @@ fn dates_are_xsd_date_times_from_both_formats() {
 #[test]
 fn categories_are_nodes_with_term_scheme_and_label() {
     let g = graph(&fixture("rss2.xml"), None);
-    let a = "http://feeds.example.org/posts/a";
+    let a = &item(
+        "http://feeds.example.org/",
+        "http://feeds.example.org/posts/a",
+    );
     let tags = digest("category", &["http://example.org/tags", "rust"]);
     let notes = digest("category", &["", "Notes"]);
     let syndic8 = digest("category", &["Syndic8", "1765"]);
@@ -416,12 +439,14 @@ fn categories_are_nodes_with_term_scheme_and_label() {
 #[test]
 fn every_link_is_carried_with_its_relation_type_hreflang_and_title() {
     let g = graph(&fixture("reclaim-atom.xml"), None);
-    let one = "http://reclaim.example.org/posts/one";
+    let feed = "http://reclaim.example.org/feed.atom";
+    let link = "http://reclaim.example.org/posts/one";
+    let one = &item(feed, link);
     let fr = "http://reclaim.example.org/fr/posts/one";
-    assert_eq!(objects(&g, one, &format!("{RSS}link")), vec![lit(one)]);
+    assert_eq!(objects(&g, one, &format!("{RSS}link")), vec![lit(link)]);
     assert_eq!(
         objects(&g, one, &format!("{IANA}alternate")),
-        vec![Term::from(iri(fr)), Term::from(iri(one))]
+        vec![Term::from(iri(fr)), Term::from(iri(link))]
     );
     assert_eq!(
         objects(&g, fr, &format!("{DCTERMS}language")),
@@ -463,7 +488,6 @@ fn every_link_is_carried_with_its_relation_type_hreflang_and_title() {
         vec![lit("Listen")]
     );
     // The channel's links too: its self link, and a WebSub hub.
-    let feed = "http://reclaim.example.org/feed.atom";
     assert_eq!(
         objects(&g, feed, &format!("{IANA}self")),
         vec![Term::from(iri(feed))]
@@ -477,7 +501,7 @@ fn every_link_is_carried_with_its_relation_type_hreflang_and_title() {
     assert_eq!(
         objects(
             &g,
-            "http://cast.example.org/ep/1",
+            &item("http://cast.example.org/", "http://cast.example.org/ep/1"),
             &format!("{IANA}replies")
         ),
         vec![Term::from(iri("http://cast.example.org/ep/1#comments"))]
@@ -490,7 +514,8 @@ fn every_link_is_carried_with_its_relation_type_hreflang_and_title() {
 #[test]
 fn content_src_and_the_source_feed_are_carried() {
     let g = graph(&fixture("reclaim-atom.xml"), None);
-    let one = "http://reclaim.example.org/posts/one";
+    let feed = "http://reclaim.example.org/feed.atom";
+    let one = &item(feed, "http://reclaim.example.org/posts/one");
     let pdf = "http://reclaim.example.org/one.pdf";
     assert_eq!(
         objects(&g, one, &format!("{DCTERMS}hasFormat")),
@@ -506,7 +531,7 @@ fn content_src_and_the_source_feed_are_carried() {
         vec![Term::from(iri("http://elsewhere.example.net/feed.atom"))]
     );
     // With no self link, the source's id; a relative link or src is not guessed at.
-    let two = "http://reclaim.example.org/posts/two";
+    let two = &item(feed, "http://reclaim.example.org/posts/two");
     assert_eq!(
         objects(&g, two, &format!("{DCTERMS}source")),
         vec![Term::from(iri("http://third.example.com/feed"))]
@@ -521,7 +546,7 @@ fn content_src_and_the_source_feed_are_carried() {
     assert_eq!(
         objects(
             &g,
-            "http://cast.example.org/ep/1",
+            &item("http://cast.example.org/", "http://cast.example.org/ep/1"),
             &format!("{DCTERMS}source")
         ),
         vec![Term::from(iri("http://elsewhere.example.net/rss.xml"))]
@@ -581,7 +606,10 @@ fn category_hierarchies_are_skos_broader() {
 #[test]
 fn rss1_dc_subject_is_a_category() {
     let g = graph(&fixture("reclaim-rss1.xml"), None);
-    let item = "http://subjects.example.org/1";
+    let item = &item(
+        "http://subjects.example.org/feed.rdf",
+        "http://subjects.example.org/1",
+    );
     assert_eq!(
         objects(&g, item, &format!("{DC}subject")),
         vec![lit("R&D \u{2014} notes <b>"), lit("rust")]
@@ -609,7 +637,10 @@ fn an_rss2_enclosure_is_carried() {
     assert_eq!(
         objects(
             &g,
-            "http://feeds.example.org/posts/a",
+            &item(
+                "http://feeds.example.org/",
+                "http://feeds.example.org/posts/a"
+            ),
             &format!("{ENC}enclosure")
         ),
         vec![Term::from(iri(mp3))]
@@ -648,7 +679,10 @@ fn the_same_item_as_rss2_and_atom_lifts_to_the_same_triples() {
             lit("tag:same.example.org,2026:feed"),
         ),
         t(
-            "http://same.example.org/posts/one",
+            &item(
+                "http://same.example.org/feed",
+                "http://same.example.org/posts/one",
+            ),
             format!("{DCTERMS}modified"),
             date("2026-10-08T08:00:00Z"),
         ),

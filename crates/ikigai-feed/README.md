@@ -20,7 +20,7 @@ needs.
 | argument | | |
 | --- | --- | --- |
 | `content` | required, read as a body | the feed's bytes, usually piped in from a fetch |
-| `base` | optional, an IRI | the feed's own IRI: names the channel, resolves relative links (beneath any `xml:base`), and seeds the digest IRI of an item with no IRI of its own |
+| `base` | optional, an IRI | the feed's own IRI: names the channel, resolves relative links (beneath any `xml:base`), and scopes every item IRI to the feed |
 | `as` | optional | the RDF face: `text/turtle` (default), `application/n-triples`, `application/n-quads`, `application/trig`, `application/rdf+xml`, `application/ld+json`, `text/html` |
 
 Turtle is written here with oxrdfio's serializer, in one triple order. Every other face is
@@ -100,14 +100,33 @@ and it is named by `base` when one is given, so a site with no feed can write th
 
 ### Item IRIs (no blank nodes anywhere)
 
-The first that applies:
+An item is named **within the feed it was lifted from**: its IRI is a digest IRI (below) over
+the channel's IRI and the item's **key**. The key is the first that applies:
 
 1. **The entry's own IRI**: Atom's `atom:id`, or RSS 1.0's `rdf:about`, when it is an absolute IRI.
 2. **An RSS `guid`** with `isPermaLink="true"`, or with no `isPermaLink` when the guid is an
-   absolute IRI. A guid with `isPermaLink="false"` never names the item, even when it looks
-   like an IRI.
+   absolute IRI. A guid with `isPermaLink="false"` is never the key, even when it looks like
+   an IRI.
 3. **The item's link** (as resolved against `xml:base` and `base`), when absolute.
-4. **A digest IRI** over the channel IRI, the title and the date (below).
+4. **None**: the digest is then over the channel IRI, the title and the date instead.
+
+The key is never the item's NAME (ledger #2707). An `atom:id` or a guid is whatever the feed
+wrote, so a feed that could name an item by it could claim another feed's item: reuse its id,
+and its headline would carry the reuser's link and date. Scoped, the reused id names an item of
+the reusing feed, and attaches nothing to the other. The id stays a property of the item, as
+`dc:identifier` (as written); the link stays `rss:link` and `iana:alternate`.
+
+**Entries sharing a key are one item.** RFC 4287 reads entries with one `atom:id` in a feed as
+versions of one entry, and so does the lift, for every key: of the entries that one IRI names,
+only the most recently updated is lifted (`updated`, else `published`; an entry with neither is
+the oldest), the first in document order on a tie. The others are dropped, not merged: merged,
+one item would carry every version's title, link and date, and the river query their product
+(ten entries sharing one id gave 10,000 rows; twenty, a refused query).
+
+**A scoped IRI is as trustworthy as the channel's.** With `base`, the channel is named by the
+IRI the feed was fetched from, and `urn:iki:feed:graph:{feed}` always passes it. Without
+`base`, the channel is named by what the feed says about itself (below), which another feed
+can say too: a host lifting feeds from more than one source passes `base`.
 
 The channel's IRI is the first of: `base`; `atom:link rel="self"`; the Atom feed's `id`; RSS
 1.0's channel `rdf:about`; the channel's link; a digest of its title.
@@ -118,7 +137,8 @@ U+0000 (no XML text can contain U+0000):
 
 | kind | parts | names |
 | --- | --- | --- |
-| `item` | channel IRI, title, date (`xsd:dateTime` lexical form, or empty) | an item with no IRI of its own |
+| `item` | channel IRI, key | an item (above) |
+| `item` | channel IRI, title, date (`xsd:dateTime` lexical form, or empty) | an item with no key |
 | `channel` | title | a channel with no IRI of its own |
 | `category` | scheme (as written, or empty), term | a category node |
 | `subcategory` | the parent's node IRI, term | a subcategory node (so one term under two parents is two nodes) |
@@ -192,14 +212,16 @@ mapping resource can make these nodes full SKOS concepts (ledger #2623).
 ```
 
 `urn:iki:feed:graph base=https://notes.example.org/feed.xml` (prefixes as above; the guid is not
-a permalink, so the link names the item):
+a permalink, so the link is the item's key, and the item is named by digest of the feed's IRI
+and the link):
 
 ```turtle
 <https://notes.example.org/feed.xml> a rss:channel ;
     rss:title "Example Notes" ;
     rss:link "https://notes.example.org/" ;
+    iana:alternate <https://notes.example.org/> ;
     dc:language "en" .
-<https://notes.example.org/posts/hello> a rss:item ;
+<nih:sha-256;9d4ea3fb7fd957e878b96d4a472fd32b8b03faf59ec4162c9200cc8f63e66f24> a rss:item ;
     dcterms:isPartOf <https://notes.example.org/feed.xml> ;
     rss:title "Hello, form" ;
     rss:link "https://notes.example.org/posts/hello" ;
@@ -209,6 +231,7 @@ a permalink, so the link names the item):
     dcterms:issued "2026-10-07T17:00:00Z"^^xsd:dateTime ;
     dc:subject "rdf" ;
     dcterms:subject <nih:sha-256;6b99679bfd1e667b89646da70ffdbbf251ce342a652a9f8c2eca03a0ec9ddde3> ;
+    iana:alternate <https://notes.example.org/posts/hello> ;
     enc:enclosure <https://notes.example.org/hello.mp3> .
 <https://notes.example.org/hello.mp3> enc:type "audio/mpeg" ; enc:length 4242 .
 <nih:sha-256;6b99679bfd1e667b89646da70ffdbbf251ce342a652a9f8c2eca03a0ec9ddde3> rdf:value "rdf" ;
