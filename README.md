@@ -30,6 +30,13 @@ All six crates pass [`ikigai-conformance`](https://crates.io/crates/ikigai-confo
 every declared RDF face parsed and blank-node-free, vocabulary terms only, cacheability held
 to its marking, capabilities enforced as declared. No opt-outs.
 
+## Designs
+
+- [ikigai-harvest](docs/design/feed-harvester.md): a feed harvester run as a persistent host job
+  under a fixed authority: fetch state, a per-host pacer, immutable item atoms, failure as
+  state, and per-day windows with materialized views. A resource-first design pass, not yet
+  built (ledger #2683).
+
 ## OWL 2 RL reasoning
 
 Mount `ikigai_reason::space()` beside `ikigai_rdf::space()` and the host's graph
