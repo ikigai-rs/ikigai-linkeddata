@@ -1,0 +1,99 @@
+# The ikigai-html vocabulary: the structural terms of the HTML lift (urn:iki:html:graph).
+#
+# `urn:iki:html:graph` (ledger #2674) lifts an HTML tree, as html5ever's tree builder builds
+# it, into triples. Published terms carry what they can and are not restated here:
+#
+#   rdf:type          a node's class (one of the classes below)
+#   rdf:value         a text node's text; an attribute's value
+#   dcterms:hasPart   a parent (document, fragment, element) to each child (element, text)
+#   schema:position   a child's 1-based position among its parent's lifted children
+#
+# Only what has no published term is minted, under `https://ikigai-rs.dev/ns/html#`: the
+# kinds of node, an element's or attribute's local name and namespace, the attribute link,
+# and the two links that root a fragment at the subject whose literal it was.
+#
+# Namespace note: self-contained under its own document, the precedent of ikigai-log's
+# `log:`, ikigai-sign's `sig:` and ikigai-throttle's `thr:` (ledger #2175).
+#
+# This file IS the published document: it is served at https://ikigai-rs.dev/ns/html,
+# deployed by hand, and checked against this repo's main by ikigai-devtools' `ns-drift`,
+# which reads the `owl:versionInfo` below on both sides. That line is the crate version
+# (test-pinned by `ontology_version_is_the_crate_version` in tests/vocabulary.rs), so
+# redeploy /ns/html after every release that changes this file.
+#
+# Domains are stated only where they hold for every subject the lift writes the property on:
+# `htm:localName` and `htm:namespace` are written on elements AND attributes, so they
+# declare none.
+
+@prefix htm:  <https://ikigai-rs.dev/ns/html#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+<https://ikigai-rs.dev/ns/html> a owl:Ontology ;
+    rdfs:label "ikigai-html vocabulary" ;
+    rdfs:comment "The structural terms of ikigai-html's lift (urn:iki:html:graph): the kinds of node in an HTML tree, element and attribute names, and how a lifted fragment hangs on its subject. Child order and text reuse dcterms:hasPart, schema:position and rdf:value. Embedded in the ikigai-html crate as VOCABULARY." ;
+    owl:versionInfo "0.3.3" .
+
+# ── The nodes ────────────────────────────────────────────────────────────────
+
+htm:Document a rdfs:Class ;
+    rdfs:label "Document" ;
+    rdfs:comment "A whole HTML document, as the tree builder parsed it; its child is the html element." ;
+    rdfs:isDefinedBy <https://ikigai-rs.dev/ns/html> .
+
+htm:Fragment a rdfs:Class ;
+    rdfs:label "Fragment" ;
+    rdfs:comment "An HTML fragment held in an RDF literal, parsed as the content of a body element; its children are the fragment's top-level nodes." ;
+    rdfs:isDefinedBy <https://ikigai-rs.dev/ns/html> .
+
+htm:Element a rdfs:Class ;
+    rdfs:label "Element" ;
+    rdfs:comment "An element of the tree." ;
+    rdfs:isDefinedBy <https://ikigai-rs.dev/ns/html> .
+
+htm:Text a rdfs:Class ;
+    rdfs:label "Text" ;
+    rdfs:comment "A run of text in the tree; rdf:value is the text, character references decoded." ;
+    rdfs:isDefinedBy <https://ikigai-rs.dev/ns/html> .
+
+htm:Attribute a rdfs:Class ;
+    rdfs:label "Attribute" ;
+    rdfs:comment "An attribute of an element; rdf:value is its value." ;
+    rdfs:isDefinedBy <https://ikigai-rs.dev/ns/html> .
+
+# ── Names ────────────────────────────────────────────────────────────────────
+
+htm:localName a rdf:Property, owl:DatatypeProperty ;
+    rdfs:label "local name" ;
+    rdfs:comment "An element's or attribute's local name, as the tree builder normalized it (lowercase for HTML)." ;
+    rdfs:range xsd:string ;
+    rdfs:isDefinedBy <https://ikigai-rs.dev/ns/html> .
+
+htm:namespace a rdf:Property, owl:ObjectProperty ;
+    rdfs:label "namespace" ;
+    rdfs:comment "An element's or attribute's namespace IRI, written only when it is not the HTML namespace for an element (SVG, MathML) or not empty for an attribute (xlink:href, xml:lang)." ;
+    rdfs:isDefinedBy <https://ikigai-rs.dev/ns/html> .
+
+# ── Links ────────────────────────────────────────────────────────────────────
+
+htm:attribute a rdf:Property, owl:ObjectProperty ;
+    rdfs:label "attribute" ;
+    rdfs:comment "An element to one of its attributes." ;
+    rdfs:domain htm:Element ;
+    rdfs:range htm:Attribute ;
+    rdfs:isDefinedBy <https://ikigai-rs.dev/ns/html> .
+
+htm:tree a rdf:Property, owl:ObjectProperty ;
+    rdfs:label "tree" ;
+    rdfs:comment "A resource to the lifted tree of an HTML literal it holds (a feed item to its content's fragment)." ;
+    rdfs:range htm:Fragment ;
+    rdfs:isDefinedBy <https://ikigai-rs.dev/ns/html> .
+
+htm:property a rdf:Property, owl:ObjectProperty ;
+    rdfs:label "property" ;
+    rdfs:comment "A fragment to the predicate whose literal it was lifted from, so the trees of two predicates on one subject stay apart." ;
+    rdfs:domain htm:Fragment ;
+    rdfs:range rdf:Property ;
+    rdfs:isDefinedBy <https://ikigai-rs.dev/ns/html> .

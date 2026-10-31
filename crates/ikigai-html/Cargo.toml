@@ -1,0 +1,31 @@
+[package]
+name = "ikigai-html"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "HTML lifted into skolemized structural RDF (element, attribute, child order, text), as a cacheable ikigai resource"
+
+[dependencies]
+ikigai-core.workspace = true
+ikigai-rdf.workspace = true
+oxrdf.workspace = true
+oxrdfio.workspace = true
+async-trait = "0.1"
+# The vetted parser (ledger #2674): the WHATWG tree builder, driven into this crate's own arena.
+html5ever = "0.40"
+# Digest IRIs (RFC 6920 `nih:sha-256;…`): every node the lift mints is named by one.
+sha2 = "0.10"
+
+[dev-dependencies]
+futures = "0.3"
+ikigai-conformance = "0.12.0"
+# tests/lift.rs selects from the lift with SPARQL. `rdf-12` because sibling test builds turn
+# oxrdf's on, and an rdf-12 oxrdf builds spargebra only with it (ikigai-reason's note).
+ikigai-sparql = { path = "../ikigai-sparql", features = ["rdf-12"] }
+oxrdfio = { workspace = true, features = ["rdf-12"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
