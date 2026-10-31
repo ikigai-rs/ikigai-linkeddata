@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic. What the form once lost from RSS 2.0 (ledger #2672): iTunes category
+     hierarchies, an item's source feed, and its comments link. -->
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title>Reclaim Cast</title>
+    <link>http://cast.example.org/</link>
+    <description>A synthetic podcast.</description>
+    <itunes:category text="Technology">
+      <itunes:category text="Podcasting"/>
+    </itunes:category>
+    <itunes:category text="Kids &amp; Family">
+      <itunes:category text="Education for Kids"/>
+    </itunes:category>
+    <item>
+      <title>Copied</title>
+      <link>http://cast.example.org/ep/1</link>
+      <guid>http://cast.example.org/ep/1</guid>
+      <source url="http://elsewhere.example.net/rss.xml">Elsewhere</source>
+      <comments>http://cast.example.org/ep/1#comments</comments>
+    </item>
+  </channel>
+</rss>

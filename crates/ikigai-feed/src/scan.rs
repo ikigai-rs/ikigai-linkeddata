@@ -10,11 +10,15 @@
 //!    deeper than [`MAX_FEED_DEPTH`] is refused here, counted on a `Vec`, never on the stack.
 //! 2. **Recover what feed-rs's model drops** and the form needs: the RSS 2.0 `guid`'s
 //!    `isPermaLink` (the item IRI rule turns on it), RSS 1.0's `rdf:about` on the channel and
-//!    each item (they are already IRIs), and the `xml:lang` in effect on each Atom entry.
+//!    each item (they are already IRIs), the `xml:lang` in effect on each Atom entry, an
+//!    entry's source feed (Atom's `atom:source`, RSS 2.0's `source/@url`), and RSS 1.0's
+//!    `dc:subject` (feed-rs reads no category in RSS 1.0).
 //!
-//! It reads attributes only, never text, and decides which elements are entries the way
-//! feed-rs does (the root's local name; entries as its or its channel's children), so the
-//! `n`th entry here is feed-rs's `n`th. The caller checks the counts agree before using one.
+//! It reads attributes, and the text of exactly two elements at fixed places: RSS 1.0's
+//! `dc:subject` on the channel or an item, and `atom:source/atom:id`. It decides which elements
+//! are entries the way feed-rs does (the root's local name; entries as its or its channel's
+//! children), so the `n`th entry here is feed-rs's `n`th. The caller checks the counts agree
+//! before using one.
 
 use ikigai_core::{Error, Result};
 use quick_xml::events::{BytesStart, Event};
@@ -29,6 +33,7 @@ pub const MAX_FEED_DEPTH: usize = 64;
 const ATOM: &str = "http://www.w3.org/2005/Atom";
 const RSS1: &str = "http://purl.org/rss/1.0/";
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+const DC: &str = "http://purl.org/dc/elements/1.1/";
 
 /// Which feed the root element names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +55,29 @@ pub struct Seen {
     pub permalink: Option<bool>,
     /// The `xml:lang` in effect on the entry (its own or inherited).
     pub lang: Option<String>,
+    /// RSS 1.0: the item's `dc:subject` texts, trimmed, in document order.
+    pub subjects: Vec<String>,
+    /// The feed the entry was copied from: Atom's `atom:source`, RSS 2.0's `source/@url`.
+    pub source: Source,
+}
+
+/// What names an entry's source feed, as written (the lift keeps only absolute IRIs).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Source {
+    /// Atom: `atom:source/atom:link rel="self"`. RSS 2.0: `source/@url`.
+    pub this: Option<String>,
+    /// Atom: `atom:source/atom:id`.
+    pub id: Option<String>,
+    /// Atom: the first `atom:source/atom:link` with `rel="alternate"` or no `rel`.
+    pub alternate: Option<String>,
+}
+
+/// An element whose text the scan keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Text {
+    ChannelSubject,
+    ItemSubject,
+    SourceId,
 }
 
 /// The scan's findings.
@@ -60,6 +88,8 @@ pub struct Scan {
     pub channel_about: Option<String>,
     /// The `xml:lang` in effect on the channel (RSS) or feed (Atom).
     pub channel_lang: Option<String>,
+    /// RSS 1.0: the channel's `dc:subject` texts, trimmed, in document order.
+    pub channel_subjects: Vec<String>,
     pub entries: Vec<Seen>,
     /// Whether an RSS 1.0 `rss:channel` sat under `rdf:RDF`: RDF/XML without one is not a feed.
     channel: bool,
@@ -86,6 +116,11 @@ pub fn scan(bytes: &[u8]) -> Result<Scan> {
     let mut found: Option<Scan> = None;
     // The depth of the entry being read, while one is open.
     let mut entry_depth: Option<usize> = None;
+    // The depth of the RSS 1.0 channel, or of an entry's `atom:source`, while one is open.
+    let mut channel_depth: Option<usize> = None;
+    let mut source_depth: Option<usize> = None;
+    // The element whose text is being kept, its depth, and the text so far.
+    let mut text: Option<(Text, usize, String)> = None;
     loop {
         let (ns, event) = match reader.read_resolved_event() {
             Ok((ns, event)) => (namespace(ns), event),
@@ -115,6 +150,7 @@ pub fn scan(bytes: &[u8]) -> Result<Scan> {
                             root,
                             channel_about: None,
                             channel_lang: (root == Root::Atom).then(|| lang.clone()).flatten(),
+                            channel_subjects: Vec::new(),
                             entries: Vec::new(),
                             channel: false,
                         });
@@ -147,7 +183,46 @@ pub fn scan(bytes: &[u8]) -> Result<Scan> {
                                 };
                             }
                         }
+                        (Root::Atom, 3, "source")
+                            if ns.as_deref() == Some(ATOM) && entry_depth == Some(2) =>
+                        {
+                            source_depth = Some(depth);
+                        }
+                        (Root::Atom, 4, "id")
+                            if ns.as_deref() == Some(ATOM) && source_depth == Some(3) =>
+                        {
+                            text = Some((Text::SourceId, depth, String::new()));
+                        }
+                        (Root::Atom, 4, "link")
+                            if ns.as_deref() == Some(ATOM) && source_depth == Some(3) =>
+                        {
+                            let rel = attribute(&reader, &element, None, "rel");
+                            let href = attribute(&reader, &element, None, "href");
+                            if let Some(seen) = scan.entries.last_mut() {
+                                let source = &mut seen.source;
+                                match rel.as_deref().map(str::trim) {
+                                    Some("self") if source.this.is_none() => source.this = href,
+                                    None | Some("alternate") if source.alternate.is_none() => {
+                                        source.alternate = href
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        (Root::Rss, 4, "source") if ns.is_none() && entry_depth == Some(3) => {
+                            if let Some(seen) = scan.entries.last_mut() {
+                                seen.source.this = attribute(&reader, &element, None, "url");
+                            }
+                        }
+                        (Root::Rdf, 3, "subject") if ns.as_deref() == Some(DC) => {
+                            if entry_depth == Some(2) {
+                                text = Some((Text::ItemSubject, depth, String::new()));
+                            } else if channel_depth == Some(2) {
+                                text = Some((Text::ChannelSubject, depth, String::new()));
+                            }
+                        }
                         (Root::Rdf, 2, "channel") if ns.as_deref() == Some(RSS1) => {
+                            channel_depth = Some(depth);
                             scan.channel_about = attribute(&reader, &element, Some(RDF), "about");
                             scan.channel = true;
                             scan.channel_lang = lang.clone();
@@ -167,10 +242,40 @@ pub fn scan(bytes: &[u8]) -> Result<Scan> {
                 langs.push(lang);
             }
             Event::End(_) => {
-                if entry_depth == Some(langs.len()) {
-                    entry_depth = None;
+                let depth = Some(langs.len());
+                if text.as_ref().map(|(_, d, _)| *d) == depth {
+                    let (kind, _, value) = text.take().expect("the kept element is open");
+                    keep(found.as_mut(), kind, value);
+                }
+                for open in [&mut entry_depth, &mut channel_depth, &mut source_depth] {
+                    if *open == depth {
+                        *open = None;
+                    }
                 }
                 langs.pop();
+            }
+            // The text of a kept element, entity references resolved as an attribute's are.
+            Event::Text(t) => {
+                if let Some((_, _, value)) = text.as_mut() {
+                    value.push_str(&t.xml10_content());
+                }
+            }
+            Event::CData(t) => {
+                if let Some((_, _, value)) = text.as_mut() {
+                    value.push_str(&t.xml10_content());
+                }
+            }
+            Event::GeneralRef(r) => {
+                if let Some((_, _, value)) = text.as_mut() {
+                    let name = r.xml10_content();
+                    match r.resolve_char_ref() {
+                        Ok(Some(c)) => value.push(c),
+                        _ => match quick_xml::escape::resolve_predefined_entity(&name) {
+                            Some(resolved) => value.push_str(resolved),
+                            None => value.push_str(&format!("&{name};")),
+                        },
+                    }
+                }
             }
             Event::Eof if !langs.is_empty() => {
                 return Err(invalid(format!(
@@ -187,6 +292,28 @@ pub fn scan(bytes: &[u8]) -> Result<Scan> {
             "RDF/XML with no RSS 1.0 channel; {ACCEPTED}"
         ))),
         None => Err(invalid(ACCEPTED)),
+    }
+}
+
+/// File the text of a kept element where it belongs. Empty text is no subject and no id.
+fn keep(scan: Option<&mut Scan>, kind: Text, value: String) {
+    let Some(scan) = scan else { return };
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return;
+    }
+    match kind {
+        Text::ChannelSubject => scan.channel_subjects.push(value),
+        Text::ItemSubject => {
+            if let Some(seen) = scan.entries.last_mut() {
+                seen.subjects.push(value);
+            }
+        }
+        Text::SourceId => {
+            if let Some(seen) = scan.entries.last_mut() {
+                seen.source.id.get_or_insert(value);
+            }
+        }
     }
 }
 
@@ -251,6 +378,31 @@ mod tests {
         let s = scan(rdf).unwrap();
         assert_eq!(s.channel_about.as_deref(), Some("http://x/feed"));
         assert_eq!(s.entries[0].about.as_deref(), Some("http://x/1"));
+    }
+
+    #[test]
+    fn keeps_text_only_where_it_is_read() {
+        // dc:subject on the channel and an item; one anywhere else (here, an image) is not read.
+        let rdf = br#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel rdf:about="http://x/feed"><dc:subject> a </dc:subject></channel><image><dc:subject>no</dc:subject></image><item rdf:about="http://x/1"><dc:subject>b&amp;c</dc:subject><dc:subject/></item></rdf:RDF>"#;
+        let s = scan(rdf).unwrap();
+        assert_eq!(s.channel_subjects, vec!["a"]);
+        assert_eq!(s.entries[0].subjects, vec!["b&c"]);
+        // atom:source's id and links; the entry's own id and links are not the source's.
+        let atom = br#"<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>http://x/e</id><link href="http://x/e"/><source><id>tag:x,2026:s</id><link rel="self" href="http://x/s.atom"/><link href="http://x/s"/></source></entry></feed>"#;
+        let s = scan(atom).unwrap();
+        assert_eq!(
+            s.entries[0].source,
+            Source {
+                this: Some("http://x/s.atom".into()),
+                id: Some("tag:x,2026:s".into()),
+                alternate: Some("http://x/s".into()),
+            }
+        );
+        let rss = br#"<rss><channel><item><source url="http://x/r.xml">R</source></item></channel></rss>"#;
+        assert_eq!(
+            scan(rss).unwrap().entries[0].source.this.as_deref(),
+            Some("http://x/r.xml")
+        );
     }
 
     #[test]

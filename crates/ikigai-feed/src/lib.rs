@@ -7,9 +7,9 @@
 //! rule, the date rule and the category shape. Every node is an IRI: there are no blank nodes.
 //!
 //! Parsing is feed-rs's ([`feed_rs`]); this crate is the MAPPING from its model to the graph,
-//! plus a bounding pre-scan (`src/scan.rs`) that refuses deep input before the parse and recovers the
-//! three things feed-rs's model drops and the form needs (RSS 2.0's `isPermaLink`, RSS 1.0's
-//! `rdf:about`, `xml:lang`).
+//! plus a bounding pre-scan (`src/scan.rs`) that refuses deep input before the parse and recovers
+//! what feed-rs's model drops and the form needs (RSS 2.0's `isPermaLink`, RSS 1.0's
+//! `rdf:about` and `dc:subject`, `xml:lang`, an entry's source feed).
 //!
 //! A source's own conventions are data, not code (ledger #2673): [`mappings`] serves one SPARQL
 //! CONSTRUCT file per host at `urn:iki:feed:mapping:{source}` from the host's file root, and
@@ -36,7 +36,7 @@ use ikigai_rdf::canonical_triples;
 use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 use oxrdfio::{RdfFormat, RdfSerializer};
-use scan::{Root, Seen};
+use scan::{Root, Seen, Source};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
@@ -56,6 +56,10 @@ pub mod vocab {
     pub const DCAM: &str = "http://purl.org/dc/dcam/";
     pub const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
     pub const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
+    pub const SKOS: &str = "http://www.w3.org/2004/02/skos/core#";
+    /// Link relations: RFC 4287 section 4.2.7.2 makes a `rel` that is not an IRI the IRI this
+    /// prefix and the name, which the IANA link relation registry (RFC 8288) holds.
+    pub const IANA: &str = "http://www.iana.org/assignments/relation/";
 }
 
 /// The published RSS 1.0, content-module, enclosure-module and `dcam:` terms the form speaks,
@@ -217,10 +221,10 @@ pub fn lift(bytes: &[u8], base: Option<&str>) -> Result<Vec<Triple>> {
         .clone()
         .or(scan.channel_lang)
         .map(|l| l.to_lowercase());
-    out.channel(&feed, &channel, language.as_deref());
+    out.channel(&feed, &channel, language.as_deref(), &scan.channel_subjects);
     for (entry, seen) in feed.entries.iter().zip(&seen) {
         let item = item_iri(entry, seen, scan.root, &channel);
-        out.item(entry, seen, &item, &channel, language.as_deref());
+        out.item(entry, seen, scan.root, &item, &channel, language.as_deref());
     }
     Ok(out.0.into_iter().collect())
 }
@@ -350,7 +354,13 @@ impl Graph {
         }
     }
 
-    fn channel(&mut self, feed: &Feed, channel: &NamedNode, language: Option<&str>) {
+    fn channel(
+        &mut self,
+        feed: &Feed,
+        channel: &NamedNode,
+        language: Option<&str>,
+        subjects: &[String],
+    ) {
         self.add(channel, vocab::RDF, "type", rss("channel"));
         self.string(channel, vocab::RSS, "title", text(&feed.title));
         self.string(
@@ -368,12 +378,15 @@ impl Graph {
         self.people(channel, &feed.authors);
         self.dates(channel, feed.published, feed.updated);
         self.categories(channel, &feed.categories);
+        self.subjects(channel, subjects);
+        self.links(channel, &feed.links);
     }
 
     fn item(
         &mut self,
         entry: &Entry,
         seen: &Seen,
+        root: Root,
         item: &NamedNode,
         channel: &NamedNode,
         language: Option<&str>,
@@ -403,18 +416,20 @@ impl Graph {
         self.people(item, &entry.authors);
         self.dates(item, entry.published, entry.updated);
         self.categories(item, &entry.categories);
-        for link in &entry.links {
-            let Some(href) = absolute(&link.href) else {
-                continue;
-            };
-            match link.rel.as_deref() {
-                Some("enclosure") => {
-                    self.enclosure(item, href, link.media_type.as_deref(), link.length)
-                }
-                Some("via") => self.add(item, vocab::DCTERMS, "source", href),
-                Some("related") => self.add(item, vocab::DCTERMS, "relation", href),
-                _ => {}
+        self.subjects(item, &seen.subjects);
+        self.links(item, &entry.links);
+        // Atom content stored outside the feed (`content/@src`): another format of the item.
+        // feed-rs leaves the href as written, so a relative one (no xml:base applied) is dropped.
+        // (For RSS, feed-rs puts `content:encoded`'s xml:base in the same field: not a src.)
+        let src = entry.content.as_ref().and_then(|c| c.src.as_ref());
+        if let Some(src) = src.filter(|_| root == Root::Atom) {
+            if let Some(href) = absolute(&src.href) {
+                self.add(item, vocab::DCTERMS, "hasFormat", href.clone());
+                self.string(&href, vocab::DCTERMS, "format", src.media_type.as_deref());
             }
+        }
+        if let Some(source) = source_iri(&seen.source) {
+            self.add(item, vocab::DCTERMS, "source", source);
         }
         // RSS 2.0's <enclosure>, and MediaRSS content, arrive as media objects.
         for content in entry.media.iter().flat_map(|m| &m.content) {
@@ -423,6 +438,58 @@ impl Graph {
                 self.enclosure(item, href, media_type.as_deref(), content.size);
             }
         }
+    }
+
+    /// Every link, each under its relation: an enclosure as `enc:enclosure`, `via` as
+    /// `dcterms:source` and `related` as `dcterms:relation` (the form's terms for them), a
+    /// comments link as `replies`, a relation in [`RELATIONS`] as its IANA IRI (no `rel` is
+    /// `alternate`), and any other as `dcterms:relation`. The target carries the link's `type`
+    /// (`dcterms:format`, but `enc:type` on an enclosure), `hreflang` (`dcterms:language`) and
+    /// `title` (`dcterms:title`). The literal `rss:link` (the first alternate) stays as before.
+    fn links(&mut self, s: &NamedNode, links: &[Link]) {
+        for link in links {
+            let Some(href) = absolute(&link.href) else {
+                continue;
+            };
+            let rel = link.rel.as_deref().map(str::trim).filter(|r| !r.is_empty());
+            let media = link.media_type.as_deref();
+            match (&link.target, rel) {
+                (None, Some("enclosure")) => {
+                    self.enclosure(s, href.clone(), media, link.length);
+                }
+                (None, Some("via")) => {
+                    self.add(s, vocab::DCTERMS, "source", href.clone());
+                    self.string(&href, vocab::DCTERMS, "format", media);
+                }
+                (None, Some("related")) => {
+                    self.add(s, vocab::DCTERMS, "relation", href.clone());
+                    self.string(&href, vocab::DCTERMS, "format", media);
+                }
+                (target, rel) => {
+                    let relation = match (target, rel.map(str::to_ascii_lowercase)) {
+                        (Some(_), _) => iana("replies"),
+                        (None, None) => iana("alternate"),
+                        (None, Some(rel)) if RELATIONS.contains(&rel.as_str()) => iana(&rel),
+                        // A relation the form does not restate (an extension IRI, an
+                        // unregistered name): the link is kept, its relation is not.
+                        (None, Some(_)) => {
+                            NamedNode::new_unchecked(format!("{}relation", vocab::DCTERMS))
+                        }
+                    };
+                    self.0
+                        .insert(Triple::new(s.clone(), relation, href.clone()));
+                    self.string(&href, vocab::DCTERMS, "format", media);
+                }
+            }
+            self.string(&href, vocab::DCTERMS, "language", link.href_lang.as_deref());
+            self.string(&href, vocab::DCTERMS, "title", link.title.as_deref());
+        }
+    }
+
+    /// RSS 1.0's `dc:subject` texts, which feed-rs does not read: categories with no scheme.
+    fn subjects(&mut self, s: &NamedNode, subjects: &[String]) {
+        let categories: Vec<Category> = subjects.iter().map(|t| Category::new(t)).collect();
+        self.categories(s, &categories);
     }
 
     fn people(&mut self, s: &NamedNode, people: &[Person]) {
@@ -469,8 +536,15 @@ impl Graph {
     /// a node named by digest of scheme and term, carrying `rdf:value` the term, `rdfs:label`
     /// the label, and `dcam:memberOf` the scheme. A scheme that is no absolute IRI is a node
     /// named by digest of its text, labelled with it.
+    ///
+    /// A subcategory (iTunes nests them) is a node of its own, named by digest of its parent's
+    /// node and its term, with `skos:broader` its parent's node. Every level is a subject of
+    /// `s`, the parents as before and each subcategory beside them. The walk is a work list, not
+    /// recursion; the pre-scan has already bounded the nesting.
     fn categories(&mut self, s: &NamedNode, categories: &[Category]) {
-        for category in categories {
+        let mut work: Vec<(&Category, Option<NamedNode>)> =
+            categories.iter().rev().map(|c| (c, None)).collect();
+        while let Some((category, parent)) = work.pop() {
             let term = category.term.trim();
             if term.is_empty() {
                 continue;
@@ -480,7 +554,20 @@ impl Graph {
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
-            let node = digest("category", &[scheme.unwrap_or(""), term]);
+            let node = match &parent {
+                None => digest("category", &[scheme.unwrap_or(""), term]),
+                Some(parent) => digest("subcategory", &[parent.as_str(), term]),
+            };
+            if let Some(parent) = parent {
+                self.add(&node, vocab::SKOS, "broader", parent);
+            }
+            work.extend(
+                category
+                    .subcategories
+                    .iter()
+                    .rev()
+                    .map(|sub| (sub, Some(node.clone()))),
+            );
             self.string(s, vocab::DC, "subject", Some(term));
             self.add(s, vocab::DCTERMS, "subject", node.clone());
             self.add(
@@ -519,6 +606,38 @@ impl Graph {
             );
         }
     }
+}
+
+/// The IRI an entry's source feed is named by, the first absolute of: its self link (RSS 2.0's
+/// `source/@url`), its `atom:id`, its alternate link. Each is taken as written.
+fn source_iri(source: &Source) -> Option<NamedNode> {
+    [&source.this, &source.id, &source.alternate]
+        .into_iter()
+        .find_map(|iri| iri.as_deref().and_then(absolute))
+}
+
+/// The IANA link relations the form writes under their own IRI ([`vocab::IANA`]): those the
+/// feed specifications use (Atom, its threading, licence, publishing and paging extensions,
+/// WebSub), each restated in [`VOCABULARY`]. `enclosure`, `via` and `related` have form terms.
+pub const RELATIONS: [&str; 14] = [
+    "alternate",
+    "self",
+    "replies",
+    "license",
+    "edit",
+    "edit-media",
+    "first",
+    "last",
+    "next",
+    "previous",
+    "prev",
+    "hub",
+    "payment",
+    "describedby",
+];
+
+fn iana(rel: &str) -> NamedNode {
+    NamedNode::new_unchecked(format!("{}{rel}", vocab::IANA))
 }
 
 fn rss(local: &str) -> NamedNode {

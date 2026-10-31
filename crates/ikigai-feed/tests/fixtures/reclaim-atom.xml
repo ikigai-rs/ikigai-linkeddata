@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic. What the form once lost from Atom (ledger #2672): every link with its hreflang
+     and title, content stored outside the feed, and the feed an entry was copied from. -->
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>tag:reclaim.example.org,2026:feed</id>
+  <title>Reclaim</title>
+  <link href="http://reclaim.example.org/"/>
+  <link rel="self" href="http://reclaim.example.org/feed.atom" type="application/atom+xml"/>
+  <link rel="hub" href="http://hub.example.net/"/>
+  <updated>2026-10-09T12:00:00Z</updated>
+  <entry>
+    <id>http://reclaim.example.org/posts/one</id>
+    <title>One, in two languages</title>
+    <link rel="alternate" href="http://reclaim.example.org/posts/one" type="text/html" hreflang="en" title="One"/>
+    <link rel="alternate" href="http://reclaim.example.org/fr/posts/one" type="text/html" hreflang="fr" title="Un"/>
+    <link rel="license" href="http://creativecommons.org/licenses/by/4.0/"/>
+    <link rel="http://opds-spec.org/acquisition" href="http://reclaim.example.org/one.epub"/>
+    <link rel="enclosure" href="http://reclaim.example.org/one.mp3" type="audio/mpeg" length="42" hreflang="en" title="Listen"/>
+    <updated>2026-10-08T08:00:00Z</updated>
+    <content type="application/pdf" src="http://reclaim.example.org/one.pdf"/>
+    <source>
+      <id>tag:elsewhere.example.net,2026:feed</id>
+      <title>Elsewhere</title>
+      <link rel="self" href="http://elsewhere.example.net/feed.atom"/>
+      <link href="http://elsewhere.example.net/"/>
+      <updated>2026-10-01T00:00:00Z</updated>
+    </source>
+  </entry>
+  <entry>
+    <id>http://reclaim.example.org/posts/two</id>
+    <title>A source named by its id alone, and a relative src</title>
+    <updated>2026-10-07T08:00:00Z</updated>
+    <content type="text/plain" src="two.txt"/>
+    <source>
+      <id>http://third.example.com/feed</id>
+      <link href="relative/only"/>
+    </source>
+  </entry>
+</feed>
