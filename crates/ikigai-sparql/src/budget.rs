@@ -177,8 +177,15 @@ pub fn effective_budget(requested: Option<&str>, ceiling: Duration) -> Result<Du
     }
 }
 
-/// The refusal for work stopped at its deadline. Transient by `ikigai_core`'s rules, so it is
-/// never cached; the same query will be refused again under the same budget.
+/// The refusal for work stopped at its deadline. Transient by `ikigai_core`'s rules, and never
+/// cached: unlike [`too_large`] it states no failure expiry (ledger #2681 considered it). A
+/// refusal by size is a function of the query, its bounds and its sources, the same on every
+/// machine. A refusal by time is a function of those AND of how busy the host was: a query
+/// that crossed its deadline while the host was loaded may fit when it is not, and a cached
+/// `Timeout` would refuse it to every caller for the whole expiry, a burst of load turned into
+/// minutes of wrong refusals. The cost it would save is also bounded already, by the budget
+/// itself, which a host's anonymous door keeps small; a size refusal's work has no such bound
+/// below the time budget, which is why that one is cached.
 pub fn timeout(budget: Duration, what: &str) -> Error {
     Error::Timeout(format!(
         "{what} ran past its time budget of {} ms and was stopped (ledger #964). The budget is \
@@ -431,8 +438,44 @@ pub enum Measure {
     Bytes,
 }
 
+/// How long a refusal by [`too_large`] over a per-query dataset may be served again without
+/// recomputing it: **5 minutes**, [`ikigai_core`]'s default failure ceiling (ledger #2681).
+///
+/// The refusal is a function of the query, its bounds and its `graph=` sources, so it is as
+/// cacheable as the answer it refused would have been, and it is no cheaper: a full-river
+/// SELECT over about 3,900 feeds is refused at [`DEFAULT_MAX_BYTES`] after about 5.8 s of work
+/// (scale round 2026-10-30, F2), and before this every read paid that again. The kernel hangs
+/// the cached refusal from the threads of every source the query read, so a cut of any of
+/// them drops it at once; this bound covers what no thread names, such as a host that rebuilds
+/// its space with a larger bound over the same kernel. The kernel clamps it to its own failure
+/// ceiling ([`ikigai_core::Kernel::with_failure_ceiling`]) and to the sources' own expiries.
+///
+/// Stated with [`expire_too_large`]. Not stated over a shared store: its raw-handle writes cut
+/// no thread, so nothing would drop a refusal that a write made wrong, which is why its answers
+/// are uncacheable too. And not on the time budget's [`timeout`]: see there.
+pub const TOO_LARGE_EXPIRY: Duration = Duration::from_secs(300);
+
+/// The sentence every [`too_large`] refusal carries, and [`is_too_large`] recognizes.
+const NOT_TRUNCATED: &str = "It was refused, not truncated: no part of it was sent (ledger #970).";
+
+/// Whether `error` is a [`too_large`] refusal, by the row or the byte bound.
+pub fn is_too_large(error: &Error) -> bool {
+    matches!(error, Error::InvalidArgument { name, detail }
+        if name == "query" && detail.contains(NOT_TRUNCATED))
+}
+
+/// State [`TOO_LARGE_EXPIRY`] on `inv` when `outcome` is a [`too_large`] refusal, so the kernel
+/// caches it until then or until a cut of a thread it read (ledger #2681). Only for an answer
+/// that is itself cacheable: the per-query dataset's. Any other outcome states nothing.
+pub fn expire_too_large<T>(inv: &Invocation<'_>, outcome: &Result<T>) {
+    if matches!(outcome, Err(error) if is_too_large(error)) {
+        inv.failure_expires_in(TOO_LARGE_EXPIRY);
+    }
+}
+
 /// The refusal for an answer over its [`AnswerBound`]: [`Error::InvalidArgument`] on `query`,
-/// naming the bound, its value and the cure. Never cached, like every refusal.
+/// naming the bound, its value and the cure. Over a per-query dataset it is cached for
+/// [`TOO_LARGE_EXPIRY`] ([`expire_too_large`]); over a shared store never.
 ///
 /// ```
 /// use ikigai_sparql::budget::{too_large, Measure};
@@ -452,8 +495,7 @@ pub fn too_large(measure: Measure, bound: u64) -> Error {
         name: "query".to_string(),
         detail: format!(
             "the answer exceeds {bound} {unit}; add LIMIT, narrow the query, or ask the host for \
-             more. It was refused, not truncated: no part of it was sent (ledger #970). A \
-             request's `{arg}=` can only lower this bound"
+             more. {NOT_TRUNCATED} A request's `{arg}=` can only lower this bound"
         ),
     }
 }

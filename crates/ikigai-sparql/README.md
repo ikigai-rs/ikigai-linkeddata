@@ -471,6 +471,17 @@ request's `max_rows=` can only lower this bound
 The heaviest legitimate answer found in the ecosystem is 11,445 triples. A caller that wants
 more pages with `LIMIT` and `OFFSET`.
 
+### A refusal by size is cached
+
+Over a per-query dataset (`space()` and its `space_with_*` siblings without a store) the
+refusal states a **failure expiry** of `budget::TOO_LARGE_EXPIRY`, 5 minutes (ledger #2681,
+core 0.2.9's negative caching), so the kernel serves it again instead of recomputing it: a
+full-river SELECT over about 3,900 feeds is refused at 16 MiB after about 5.8 s, and each read
+paid that again. The cached refusal hangs from every `graph=` source's thread, so a cut of any
+one drops it; the kernel also clamps it to its failure ceiling and to the sources' own expiries.
+Over a shared store it is never cached: raw-handle writes cut no thread. Nor is the time
+budget's `Timeout`, whose outcome depends on how busy the host was, not only on the inputs.
+
 ### How a host raises it
 
 ```rust

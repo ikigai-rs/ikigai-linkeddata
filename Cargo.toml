@@ -15,7 +15,8 @@ homepage = "https://github.com/ikigai-rs/ikigai-linkeddata"
 # <0.2.0 under 0.x rules; core and vocab must move together to keep one core.
 # Retains space_iri, bind dropping the name, enforce_requires, and ArgSpec one_of/default.
 # ArgSpec::reads_body preserves streaming reference inputs (core 0.2.4).
-ikigai-core = "0.2.4"
+# Invocation::failure_expires_in caches ikigai-sparql's refusal by size (core 0.2.9, ledger #2681).
+ikigai-core = "0.2.9"
 ikigai-vocab = "0.2.0"
 # Oxigraph's pure-Rust RDF crates — no rocksdb, so they compile to wasm32 (the
 # browser transrepts/queries client-side). The full store is in-memory only.
