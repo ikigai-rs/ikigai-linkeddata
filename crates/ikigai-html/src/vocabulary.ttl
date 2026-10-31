@@ -34,7 +34,7 @@
 <https://ikigai-rs.dev/ns/html> a owl:Ontology ;
     rdfs:label "ikigai-html vocabulary" ;
     rdfs:comment "The structural terms of ikigai-html's lift (urn:iki:html:graph): the kinds of node in an HTML tree, element and attribute names, and how a lifted fragment hangs on its subject. Child order and text reuse dcterms:hasPart, schema:position and rdf:value. Embedded in the ikigai-html crate as VOCABULARY." ;
-    owl:versionInfo "0.3.3" .
+    owl:versionInfo "0.4.0" .
 
 # ── The nodes ────────────────────────────────────────────────────────────────
 
