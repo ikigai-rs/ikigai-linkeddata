@@ -186,6 +186,72 @@ a permalink, so the link names the item):
 
 `cargo run -p ikigai-feed --example lift -- FEED.xml [BASE]` prints any feed's form.
 
+## Per-source mappings
+
+A source's own conventions (its kinds of post, its tags) are declared as **data**, one SPARQL
+CONSTRUCT file per host, never as code per site (ledger #2673).
+
+| set | name | kind | how |
+| --- | --- | --- | --- |
+| source | `{source}` | key | the feed IRI's host, lowercased (`notes.example.org`). One mapping per host. `ikigai_feed::source_of` computes it |
+| source mapping | `urn:iki:feed:mapping:{source}` | atom (a file) | an exact rewrite onto `urn:file:feed/mappings/{source}.rq` under the config-home root the host mounts with ikigai-fs `cacheable_space`. The file is ONE SPARQL CONSTRUCT (UNION for several facets). There is no mapping vocabulary |
+| normalized feed | `urn:iki:feed:graph:{feed}` | composition | the feed at `{feed}` fetched (`urn:http:get url={feed}` for http(s), else a `Source` of `{feed}`) and lifted with `base={feed}`: `urn:iki:feed:graph` by feed IRI, so a query can name it as `graph=` |
+| mapped feed | `urn:iki:feed:mapped:{feed}` | composition | `urn:rdf:union` of `urn:iki:feed:graph:{feed}` and `urn:sparql:construct graph=<urn:iki:feed:graph:{feed}> query=<urn:iki:feed:mapping:{source}>`, the query passed BY REFERENCE. On the mapping file's own `NotFound`: the normalized graph alone |
+
+A host mounts its config-home root once and hands the same space to the mapping overlay:
+
+```rust
+let files: Arc<dyn Space> = Arc::new(ikigai_fs::cacheable_space(config_home));
+let root = Fallback::new(vec![
+    Arc::new(ikigai_feed::space()),
+    Arc::new(ikigai_feed::mapped_space()),       // urn:iki:feed:graph:{feed}, urn:iki:feed:mapped:{feed}
+    Arc::new(ikigai_feed::mappings(Arc::clone(&files))), // urn:iki:feed:mapping:{source}
+    files,                                       // urn:file:{path}
+    Arc::new(ikigai_sparql::space()),
+    Arc::new(ikigai_rdf::space()),
+    Arc::new(http),                              // urn:http:get
+]);
+```
+
+**An example mapping**, `feed/mappings/notes.example.org.rq` under the config home:
+
+```sparql
+PREFIX rss: <http://purl.org/rss/1.0/>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+# Posts titled "Quoting …" are quotations on this site.
+CONSTRUCT { ?item dcterms:type <https://notes.example.org/kinds#quotation> }
+WHERE { ?item a rss:item ; rss:title ?title . FILTER(STRSTARTS(?title, "Quoting ")) }
+```
+
+**Rules, each held by a test in `tests/mapped.rs`:**
+
+- **Sealed.** Only the file space the host hands `mappings` answers `urn:iki:feed:mapping:*`.
+  The overlay answers that family alone, and only for a `{source}` that is a lowercased host
+  (`[a-z0-9.-]`, not starting with `.` or `-`), so the family reaches no file outside
+  `feed/mappings/`. Any other name is a miss. This crate opens no file itself: unlike
+  ikigai-markdown's named-mapping server, it never touches `std::fs`.
+- **Falls back only on the mapping's own `NotFound`.** The mapped feed reads the mapping atom
+  by itself first. Its `NotFound` belongs to the file and hangs from the file's thread, so a
+  `Sink` that creates `{source}.rq` cuts the fallback, and the next read is mapped with no
+  restart. A mapping that is there but wrong fails the mapped feed. So does a failure of the
+  CONSTRUCT or the union, and so does a refused read of the mapping (`Denied` is not an
+  absence).
+- **One name for reads and writes.** The overlay reports its rewrite as the canonical name, so
+  the kernel keys the cache entry and the auto-cut on `urn:file:feed/mappings/{source}.rq`,
+  whichever spelling a request used. Measured: a `Sink` through `urn:file:` cuts a read through
+  `urn:iki:feed:mapping:`, and a `Sink` through `urn:iki:feed:mapping:` writes the file and cuts
+  both names. Either spelling is safe for a writer.
+- **Caching.** The mapped feed is a pure function of the feed's bytes and the mapping's text.
+  It is cacheable and hangs on the fetch's thread and the mapping file's thread. Editing one
+  host's file re-maps exactly that host's feeds. Another host's stay cached, and so does every
+  normalized graph, because none of them read the file.
+- **The lint a mapping author runs:** what the mapping adds to a feed is
+  `urn:rdf:diff content=<urn:iki:feed:mapped:{feed}> with=urn:iki:feed:graph:{feed}`, and it is
+  exactly the CONSTRUCT's output. `mode=removed` is always empty, because a mapping only adds.
+
+`urn:iki:feed:mapped` is a small function in this crate for now. Once core's reference templates
+(ledger #2671) and the engine's names (ledger #2619) ship, it can become a named request.
+
 ## Bounds and errors
 
 - **Size:** at most `MAX_FEED_BYTES` (8 MiB), read under a memory pool of that size, so a
