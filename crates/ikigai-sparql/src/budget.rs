@@ -210,15 +210,15 @@ pub fn timeout(budget: Duration, what: &str) -> Error {
 /// use ikigai_sparql::budget::with_deadline;
 /// use std::time::{Duration, Instant};
 ///
-/// let (spun, fired) = with_deadline(Duration::from_millis(50), |token| {
-///     let start = Instant::now();
+/// // Measure the whole call: the watchdog can start waiting before `work` starts.
+/// let start = Instant::now();
+/// let (_, fired) = with_deadline(Duration::from_millis(50), |token| {
 ///     while !token.is_cancelled() {
 ///         std::hint::spin_loop();
 ///     }
-///     start.elapsed()
 /// })
 /// .unwrap();
-/// assert!(fired && spun >= Duration::from_millis(50));
+/// assert!(fired && start.elapsed() >= Duration::from_millis(50));
 /// let (_, fired) = with_deadline(Duration::from_secs(5), |_| ()).unwrap();
 /// assert!(!fired);
 /// ```
