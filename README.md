@@ -96,3 +96,9 @@ filtered cross product over the new vocabulary; see the SPARQL budget documentat
 ## License
 
 Licensed under either of MIT or Apache-2.0 at your option (`MIT OR Apache-2.0`).
+
+## Accessibility
+
+What these crates emit that people read (an HTML table of triples, error messages, short text
+answers), the rules that output follows, how it is tested and how to report a barrier are in
+[ACCESSIBILITY.md](ACCESSIBILITY.md).
