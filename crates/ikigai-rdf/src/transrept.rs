@@ -50,17 +50,10 @@ fn parse_graph(turtle: &str, who: &str, arg: &str, labels: &mut BlankNodeLabels)
 /// its interner's hashes, which a per-graph `RandomState` makes different on every run, so the
 /// triples are sorted. Its blank nodes were relabeled as they were parsed, so all are stable.
 fn serialize_graph(graph: &Graph) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut serializer = RdfSerializer::from_format(RdfFormat::Turtle).for_writer(&mut out);
-    for triple in canonical_triples(graph.iter().map(Triple::from), |_| true) {
-        serializer
-            .serialize_triple(&triple)
-            .map_err(|e| Error::Endpoint(format!("RDF serialize error: {e}")))?;
-    }
-    serializer
-        .finish()
-        .map_err(|e| Error::Endpoint(format!("RDF serialize error: {e}")))?;
-    Ok(out)
+    crate::serialize_turtle(
+        canonical_triples(graph.iter().map(Triple::from), |_| true),
+        &Default::default(),
+    )
 }
 
 /// The second graph: the `with=` argument — inline Turtle when it starts like a

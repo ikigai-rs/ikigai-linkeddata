@@ -40,7 +40,11 @@ pub use depth::{
 pub use depth::check_rdfxml_nesting;
 
 #[cfg(feature = "transrept")]
+mod serialize;
+#[cfg(feature = "transrept")]
 mod transrept;
+#[cfg(feature = "transrept")]
+pub use serialize::serialize_turtle;
 #[cfg(feature = "transrept")]
 pub use transrept::{space, SPACE_ID};
 

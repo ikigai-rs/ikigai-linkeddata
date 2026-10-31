@@ -406,3 +406,161 @@ fn live_sources_keep_derived_faces_uncacheable() {
     }
     assert_eq!(hits.load(Ordering::SeqCst), 4);
 }
+
+#[test]
+fn turtle_retains_input_prefixes_and_identifies_source_graphs() {
+    let k = with_graph("ex:A rdfs:subClassOf ex:B . ex:x a ex:A .");
+    for form in ["closure", "inferred"] {
+        let out = issue(&k, form, &[("graph", "urn:test:graph")]).unwrap();
+        let text = String::from_utf8(out.bytes).unwrap();
+        assert!(text.contains("@prefix ex: <http://example.org/>"), "{text}");
+        assert!(text.contains("ex:x"), "{text}");
+        assert!(text.contains("# Source graph: <urn:test:graph>"), "{text}");
+    }
+}
+
+#[test]
+fn omit_thing_removes_only_inferred_typings_and_preserves_explicit_input() {
+    let input =
+        "ex:A rdfs:subClassOf ex:B . ex:x a ex:A . ex:explicit a owl:Thing . ex:x ex:p owl:Thing .";
+    let k = with_graph(input);
+    let input_triples = triples(input);
+    let thing_typing = |t: &oxrdf::Triple| {
+        t.predicate.as_str() == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+            && t.object
+                == oxrdf::NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#Thing").into()
+    };
+    for form in ["closure", "inferred"] {
+        let full = issue(&k, form, &[("graph", "urn:test:graph")]).unwrap();
+        let explicit_false = issue(
+            &k,
+            form,
+            &[("graph", "urn:test:graph"), ("omit-thing", "false")],
+        )
+        .unwrap();
+        assert_eq!(full.bytes, explicit_false.bytes);
+        let full = parse(&full.bytes);
+        let expected = full
+            .iter()
+            .filter(|t| !thing_typing(t) || input_triples.contains(t))
+            .cloned()
+            .collect();
+        for face in ["text/turtle", "application/n-triples"] {
+            let reduced = issue(
+                &k,
+                form,
+                &[
+                    ("graph", "urn:test:graph"),
+                    ("omit-thing", "true"),
+                    ("as", face),
+                ],
+            )
+            .unwrap();
+            let reduced = parse(&reduced.bytes);
+            assert_eq!(reduced, expected);
+            assert!(reduced.len() < full.len());
+            assert!(triples("ex:x a ex:B .").is_subset(&reduced));
+            if form == "closure" {
+                assert!(triples(input).is_subset(&reduced));
+            }
+        }
+    }
+    assert!(
+        matches!(issue(&k, "closure", &[("graph", "urn:test:graph"), ("omit-thing", "yes")]),
+        Err(Error::InvalidArgument { name, .. }) if name == "omit-thing")
+    );
+}
+
+#[test]
+fn omitted_typings_still_count_toward_output_bound() {
+    let input = "ex:A rdfs:subClassOf ex:B . ex:x a ex:A .";
+    let size = closure(&with_graph(input)).len();
+    let k = kernel(
+        space_with_limits(Limits {
+            max_input_triples: 2,
+            max_output_triples: size - 1,
+        })
+        .bind(Exact::new("urn:test:graph"), fixture(input)),
+    );
+    for form in ["closure", "inferred"] {
+        assert!(matches!(
+            issue(
+                &k,
+                form,
+                &[("graph", "urn:test:graph"), ("omit-thing", "true")]
+            ),
+            Err(Error::OverBudget { .. })
+        ));
+    }
+}
+
+#[test]
+fn merged_prefix_conflicts_are_lossless_and_source_labels_are_deduplicated() {
+    let k = kernel(
+        space()
+            .bind(
+                Exact::new("urn:test:first"),
+                Graph("@prefix : <urn:first:> . :x :p :y .".into(), "text/turtle"),
+            )
+            .bind(
+                Exact::new("urn:test:second"),
+                Graph(
+                    "@prefix : <urn:second:> . @prefix other: <urn:other:> . :x other:p :y ."
+                        .into(),
+                    "text/turtle",
+                ),
+            ),
+    );
+    let out = issue(
+        &k,
+        "closure",
+        &[("graph", "urn:test:first urn:test:second urn:test:first")],
+    )
+    .unwrap();
+    let text = String::from_utf8(out.bytes).unwrap();
+    assert!(text.contains("@prefix : <urn:first:>"), "{text}");
+    assert!(text.contains("@prefix other: <urn:other:>"), "{text}");
+    assert_eq!(text.matches("# Source graph: <urn:test:first>").count(), 1);
+    assert_eq!(text.matches("# Source graph: <urn:test:second>").count(), 1);
+    assert!(triples(
+        "<urn:first:x> <urn:first:p> <urn:first:y> . <urn:second:x> <urn:other:p> <urn:second:y> ."
+    )
+    .is_subset(&parse(text.as_bytes())));
+    k.cut("urn:test:first");
+    assert_eq!(
+        text.as_bytes(),
+        issue(
+            &k,
+            "closure",
+            &[("graph", "urn:test:first urn:test:second urn:test:first")]
+        )
+        .unwrap()
+        .bytes
+    );
+}
+
+#[test]
+fn relative_prefixes_and_prefix_rebinding_preserve_rdf_terms() {
+    let input = "@prefix ex: <./old/> . ex:x ex:p ex:y . @prefix ex: <./new/> . ex:x ex:p ex:y .";
+    let k = kernel(space().bind(
+        Exact::new("file:///data/source.ttl"),
+        Graph(input.into(), "text/turtle"),
+    ));
+    let out = issue(&k, "closure", &[("graph", "file:///data/source.ttl")]).unwrap();
+    let text = String::from_utf8(out.bytes).unwrap();
+    assert!(text.contains("@prefix ex: <file:///data/new/>"), "{text}");
+    assert!(triples("<file:///data/old/x> <file:///data/old/p> <file:///data/old/y> . <file:///data/new/x> <file:///data/new/p> <file:///data/new/y> .").is_subset(&parse(text.as_bytes())));
+}
+
+#[test]
+fn prefix_only_input_keeps_its_declarations() {
+    let k = kernel(space().bind(
+        Exact::new("urn:test:empty"),
+        Graph("@prefix empty: <urn:empty:> .".into(), "text/turtle"),
+    ));
+    let out = issue(&k, "closure", &[("graph", "urn:test:empty")]).unwrap();
+    let text = String::from_utf8(out.bytes).unwrap();
+    assert!(text.contains("@prefix empty: <urn:empty:>"), "{text}");
+    assert!(text.contains("# Source graph: <urn:test:empty>"), "{text}");
+    parse(text.as_bytes());
+}
