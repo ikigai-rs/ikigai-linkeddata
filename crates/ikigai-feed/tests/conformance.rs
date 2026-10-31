@@ -60,11 +60,11 @@ fn conforms() {
 }
 
 /// The mapped feed (ledger #2673), walked as a host mounts it: its config-home root through
-/// ikigai-fs `cacheable_space` and the mapping overlay, SPARQL and RDF beside it, and a fixture
-/// `urn:http:get` standing in for the network.
+/// ikigai-fs `cacheable_space` and the mapping overlay, HTML, SPARQL and RDF beside it, and a
+/// fixture `urn:http:get` standing in for the network.
 ///
-/// - Neither door is `pure`: each fetches its feed, and the mapped feed reads its host's
-///   mapping file. Both are `cacheable`, hanging from those reads' threads.
+/// - No door is `pure`: each fetches its feed, and the mapped feed reads its host's mapping
+///   file. All three are `cacheable`, hanging from those reads' threads.
 /// - Each needs a [`Fixture`] binding `{feed}` to a feed the fixture fetch serves.
 #[test]
 fn the_mapped_feed_conforms() {
@@ -92,6 +92,7 @@ fn the_mapped_feed_conforms() {
         Arc::new(ikigai_feed::mapped_space()),
         Arc::new(ikigai_feed::mappings(Arc::clone(&files))),
         files,
+        Arc::new(ikigai_html::space()),
         Arc::new(ikigai_sparql::space()),
         Arc::new(ikigai_rdf::space()),
         Arc::new(http),
@@ -100,11 +101,17 @@ fn the_mapped_feed_conforms() {
     let report = Suite::new()
         .own("feed-*")
         .vocabulary(ikigai_feed::VOCABULARY)
+        // The feed's HTML door serves ikigai-html's lift, in that crate's published terms.
+        .vocabulary(ikigai_html::VOCABULARY)
         .cacheable("feed-graph-at")
         .cacheable("feed-mapped")
+        .cacheable("feed-html")
         .fixture(
             Fixture::new("feed-graph-at", Verb::Source)
                 .binding("feed", "http://example.org/feed.xml"),
+        )
+        .fixture(
+            Fixture::new("feed-html", Verb::Source).binding("feed", "http://example.org/feed.xml"),
         )
         .fixture(
             Fixture::new("feed-mapped", Verb::Source)
@@ -117,7 +124,7 @@ fn the_mapped_feed_conforms() {
     eprintln!("{report}");
     assert!(report.is_clean(), "{report}");
     assert!(report.unprobed.is_empty(), "every check probes: {report}");
-    assert_eq!(report.endpoints, 2, "{report}");
+    assert_eq!(report.endpoints, 3, "{report}");
     assert_eq!(
         report.checks.skipped().count(),
         0,

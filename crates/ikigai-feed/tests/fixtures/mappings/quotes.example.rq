@@ -1,0 +1,79 @@
+# quotes.example: its quote posts, and its tags. Synthetic, like the feed it maps.
+#
+# A quote post is an item titled "Quoting …" whose summary holds a <blockquote cite="…">
+# followed by <p class="cite">— <a href="…">Name</a>…</p>. Its kind is a term on the item;
+# the quotation is a part of the item, quoted from the cite and created by the person the
+# cite paragraph's first link names, never by the item's author.
+#
+# Each branch binds its own variables: a template triple is written for every solution that
+# binds all of its variables, so a shared ?item would give every tagged item the quote kind.
+#
+# Minted IRIs are RFC 6920 digests in ikigai-feed's form: SHA-256 over a kind and its parts,
+# each followed by U+0000.
+PREFIX rss: <http://purl.org/rss/1.0/>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+PREFIX dcam: <http://purl.org/dc/dcam/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX schema: <https://schema.org/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+PREFIX htm: <https://ikigai-rs.dev/ns/html#>
+CONSTRUCT {
+  ?post dcterms:type <http://quotes.example/kinds#quote> ;
+        dcterms:hasPart ?q .
+  ?q a schema:Quotation ;
+     prov:wasQuotedFrom ?cite ;
+     schema:text ?text ;
+     schema:creator ?agent .
+  ?agent schema:name ?name ;
+         schema:url ?href .
+  ?tagged dcterms:subject ?tag .
+  ?tag rdf:value ?term ;
+       dcam:memberOf <http://quotes.example/tags> .
+}
+WHERE {
+  {
+    ?post a rss:item ; rss:title ?title ; htm:tree ?root .
+    FILTER(STRSTARTS(?title, "Quoting "))
+    ?root htm:property rss:description ; dcterms:hasPart ?bq , ?p .
+    ?bq htm:localName "blockquote" ;
+        htm:attribute [ htm:localName "cite" ; rdf:value ?citeText ] .
+    ?p htm:localName "p" ;
+       htm:attribute [ htm:localName "class" ; rdf:value ?class ] ;
+       dcterms:hasPart ?a .
+    FILTER(CONTAINS(CONCAT(" ", ?class, " "), " cite "))
+    # The paragraph's first link names the quoted person; any later one (the talk, the post)
+    # is not a person.
+    ?a htm:localName "a" ; schema:position ?at ;
+       htm:attribute [ htm:localName "href" ; rdf:value ?hrefText ] ;
+       dcterms:hasPart [ a htm:Text ; rdf:value ?name ] .
+    FILTER NOT EXISTS {
+      ?p dcterms:hasPart [ htm:localName "a" ; schema:position ?before ] .
+      FILTER(?before < ?at)
+    }
+    {
+      SELECT ?bq (GROUP_CONCAT(?piece; separator=" ") AS ?text) WHERE {
+        ?bq htm:localName "blockquote" ; dcterms:hasPart+ ?node .
+        ?node a htm:Text ; rdf:value ?piece .
+        FILTER(REGEX(?piece, "\\S"))
+      }
+      GROUP BY ?bq
+    }
+    BIND(IRI(?citeText) AS ?cite)
+    BIND(IRI(?hrefText) AS ?href)
+    BIND(IRI(CONCAT("nih:sha-256;",
+      SHA256(CONCAT("quotation\u0000", STR(?post), "\u0000", ?citeText, "\u0000")))) AS ?q)
+    BIND(IRI(CONCAT("nih:sha-256;",
+      SHA256(CONCAT("agent\u0000", ?name, "\u0000", ?hrefText, "\u0000")))) AS ?agent)
+  }
+  UNION
+  {
+    # A scheme-less tag is one node shared by every feed. This source's tag of the same term
+    # is the node the lift would mint had the feed written scheme="http://quotes.example/tags".
+    ?tagged a rss:item ; dcterms:subject ?shared .
+    ?shared rdf:value ?term .
+    FILTER NOT EXISTS { ?shared dcam:memberOf ?anyScheme }
+    FILTER NOT EXISTS { ?shared <http://www.w3.org/2004/02/skos/core#broader> ?anyParent }
+    BIND(IRI(CONCAT("nih:sha-256;",
+      SHA256(CONCAT("category\u0000http://quotes.example/tags\u0000", ?term, "\u0000")))) AS ?tag)
+  }
+}

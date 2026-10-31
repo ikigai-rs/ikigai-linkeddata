@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic: every name, address and quotation here is invented for the tests. Shaped like
+     a blog's Atom quote entry: a title `Quoting <name>`, a blockquote with `cite` in the
+     summary, then `<p class="cite">— <a href="…">Name</a></p>`. -->
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>http://quotes.example/</id>
+  <title>Example Quotes</title>
+  <link rel="alternate" href="http://quotes.example/"/>
+  <link rel="self" href="http://quotes.example/feed.atom"/>
+  <updated>2026-10-30T12:00:00Z</updated>
+  <entry>
+    <id>http://quotes.example/2026/Oct/30/quoting-ida-quoted/</id>
+    <title>Quoting Ida Quoted</title>
+    <link href="http://quotes.example/2026/Oct/30/quoting-ida-quoted/"/>
+    <link rel="via" href="http://via.example/where-i-saw-it"/>
+    <published>2026-10-30T10:00:00Z</published>
+    <author><name>Quinn Quoter</name></author>
+    <category term="go"/>
+    <category term="graphs"/>
+    <summary type="html">&lt;blockquote cite="http://elsewhere.example/talks/squint"&gt;&lt;p&gt;Every feed is a graph if you squint.&lt;/p&gt;&lt;/blockquote&gt;&lt;p class="cite"&gt;&amp;mdash; &lt;a href="http://elsewhere.example/ida"&gt;Ida Quoted&lt;/a&gt;, &lt;a href="http://elsewhere.example/talks/squint"&gt;a talk&lt;/a&gt;&lt;/p&gt;</summary>
+  </entry>
+  <entry>
+    <id>http://quotes.example/2026/Oct/29/quoting-quinn-quoter/</id>
+    <title>Quoting Quinn Quoter</title>
+    <link href="http://quotes.example/2026/Oct/29/quoting-quinn-quoter/"/>
+    <published>2026-10-29T10:00:00Z</published>
+    <author><name>Quinn Quoter</name></author>
+    <summary type="html">&lt;blockquote cite="http://quotes.example/2020/old-post/"&gt;&lt;p&gt;I said this first, years ago.&lt;/p&gt;&lt;/blockquote&gt;&lt;p class="cite"&gt;&amp;mdash; &lt;a href="http://quotes.example/"&gt;Quinn Quoter&lt;/a&gt;&lt;/p&gt;</summary>
+  </entry>
+  <entry>
+    <id>http://quotes.example/2026/Oct/28/quoting-season/</id>
+    <title>Quoting season is open</title>
+    <link href="http://quotes.example/2026/Oct/28/quoting-season/"/>
+    <published>2026-10-28T10:00:00Z</published>
+    <author><name>Quinn Quoter</name></author>
+    <category term="go"/>
+    <summary type="html">&lt;p&gt;A note whose title starts like a quote post, with no blockquote in it.&lt;/p&gt;</summary>
+  </entry>
+</feed>
