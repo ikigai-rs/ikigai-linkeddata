@@ -16,16 +16,30 @@ Both take these ArgSpecs:
 | Argument | Meaning |
 | --- | --- |
 | `graph` (required) | One or more graph IRIs, separated by commas or whitespace |
+| `omit-thing` | `false` (default); `true` omits inferred `rdf:type owl:Thing` triples, preserving explicit input typings |
 | `profile` | `owl-rl` (default and currently the only choice) |
 | `as` | `text/turtle` (default), `application/n-triples`, `application/n-quads`, `application/trig`, `application/rdf+xml`, `application/ld+json`, or `text/html` |
 
 Mount `ikigai_reason::space()` and `ikigai_rdf::space()` together; the latter
 provides the non-Turtle faces through `urn:rdf:transrept`. Turtle output uses
-Oxigraph's serializer. Input media types must name an RDF syntax supported by
-`oxrdfio`. Relative IRIs resolve against the source IRI. Dataset inputs are
+the shared `ikigai-rdf` serializer backed by Oxigraph. Input media types must name
+an RDF syntax supported by `oxrdfio`. Relative IRIs resolve against the source IRI. Dataset inputs are
 flattened into one graph. Blank nodes are scoped to their source document;
 repeated source IRIs are read once. Output order and blank labels are deterministic
-for the same inputs. The profile delegates to reasonable's OWL 2 RL rules; this
+for the same inputs. Turtle retains the input namespace prefixes (resolved against
+its base); when sources conflict on a prefix name, the first source wins and
+other terms serialize losslessly as full IRIs. Within a document the final
+binding wins. Turtle comments identify closure versus inferred output and list
+each source graph once. These identify the merged answer, not per-triple
+provenance: entailments may depend on several graphs. Other faces preserve the
+RDF triples but do not retain those comments.
+
+For a shorter answer in runbook pages, request
+`urn:reason:inferred graph=urn:my:data,urn:my:vocabulary omit-thing=true`.
+This removes only new `rdf:type owl:Thing` triples, after reasoning and budget
+checks, on every output face. Full output remains the default so existing callers
+still receive the documented complete closure or exact input subtraction.
+The profile delegates to reasonable's OWL 2 RL rules; this
 module does not provide a consistency verdict or an RDFS-only mode.
 
 ```rust
@@ -58,7 +72,8 @@ host configure both; this parameterized space stays anonymous for the host to
 name. Bounds refuse with `OverBudget`, never truncate. Parsed input occurrences
 count toward the input bound, including duplicate statements, across all sources.
 The output bound counts distinct closure triples, including the input and
-reasonable's axiomatic/reflexive conclusions, even on `urn:reason:inferred`.
+reasonable's axiomatic/reflexive conclusions, even on `urn:reason:inferred` or
+with `omit-thing=true`.
 
 The input bound is checked before calling `reason()`: reasonable cannot be
 interrupted, and wasm has no thread on which to time it out. This limits the
