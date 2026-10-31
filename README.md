@@ -36,6 +36,11 @@ to its marking, capabilities enforced as declared. No opt-outs.
   under a fixed authority: fetch state, a per-host pacer, immutable item atoms, failure as
   state, and per-day windows with materialized views. A resource-first design pass, not yet
   built (ledger #2683).
+- [A governed SPARQL `SERVICE`](docs/design/sparql-service.md): `SERVICE <urn:…>` as kernel
+  requests under the caller's capability, narrowed to what a host-written service table keeps.
+  Constant names only; a capability preflight before anything is sent; one level deep; answers
+  substituted as `VALUES`, so no outer binding leaves the process. A security-first design
+  pass, not yet built (ledger #2685).
 
 ## OWL 2 RL reasoning
 
