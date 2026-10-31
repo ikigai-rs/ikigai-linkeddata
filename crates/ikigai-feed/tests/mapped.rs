@@ -97,6 +97,7 @@ fn host(label: &str) -> Host {
         Arc::new(ikigai_feed::mapped_space()),
         Arc::new(ikigai_feed::mappings(Arc::clone(&files))),
         files,
+        Arc::new(ikigai_html::space()),
         Arc::new(ikigai_sparql::space()),
         Arc::new(ikigai_rdf::space()),
         Arc::new(http),

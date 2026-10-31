@@ -227,7 +227,8 @@ CONSTRUCT file per host, never as code per site (ledger #2673).
 | source | `{source}` | key | the feed IRI's host, lowercased (`notes.example.org`). One mapping per host. `ikigai_feed::source_of` computes it |
 | source mapping | `urn:iki:feed:mapping:{source}` | atom (a file) | an exact rewrite onto `urn:file:feed/mappings/{source}.rq` under the config-home root the host mounts with ikigai-fs `cacheable_space`. The file is ONE SPARQL CONSTRUCT (UNION for several facets). There is no mapping vocabulary |
 | normalized feed | `urn:iki:feed:graph:{feed}` | composition | the feed at `{feed}` fetched (`urn:http:get url={feed}` for http(s), else a `Source` of `{feed}`) and lifted with `base={feed}`: `urn:iki:feed:graph` by feed IRI, so a query can name it as `graph=` |
-| mapped feed | `urn:iki:feed:mapped:{feed}` | composition | `urn:rdf:union` of `urn:iki:feed:graph:{feed}` and `urn:sparql:construct graph=<urn:iki:feed:graph:{feed}> query=<urn:iki:feed:mapping:{source}>`, the query passed BY REFERENCE. On the mapping file's own `NotFound`: the normalized graph alone |
+| feed HTML | `urn:iki:feed:html:{feed}` | composition | [ikigai-html](../ikigai-html)'s `urn:iki:html:graph graph=<urn:iki:feed:graph:{feed}>` once with `predicate=rss:description` and once with `content:encoded`, unioned: each item's (or the channel's) HTML as structural triples, hanging on it by `htm:tree` |
+| mapped feed | `urn:iki:feed:mapped:{feed}` | composition | `urn:rdf:union` of `urn:iki:feed:graph:{feed}` and `urn:sparql:construct graph=<urn:iki:feed:graph:{feed}>,<urn:iki:feed:html:{feed}> query=<urn:iki:feed:mapping:{source}>`, the query passed BY REFERENCE. The CONSTRUCT reads the form and its HTML together. Only what it constructs joins the form: the HTML's own triples are not in the mapped feed. On the mapping file's own `NotFound`: the normalized graph alone |
 
 A host mounts its config-home root once and hands the same space to the mapping overlay:
 
@@ -235,9 +236,10 @@ A host mounts its config-home root once and hands the same space to the mapping 
 let files: Arc<dyn Space> = Arc::new(ikigai_fs::cacheable_space(config_home));
 let root = Fallback::new(vec![
     Arc::new(ikigai_feed::space()),
-    Arc::new(ikigai_feed::mapped_space()),       // urn:iki:feed:graph:{feed}, urn:iki:feed:mapped:{feed}
+    Arc::new(ikigai_feed::mapped_space()),       // urn:iki:feed:{graph,html,mapped}:{feed}
     Arc::new(ikigai_feed::mappings(Arc::clone(&files))), // urn:iki:feed:mapping:{source}
     files,                                       // urn:file:{path}
+    Arc::new(ikigai_html::space()),              // urn:iki:html:graph, for urn:iki:feed:html
     Arc::new(ikigai_sparql::space()),
     Arc::new(ikigai_rdf::space()),
     Arc::new(http),                              // urn:http:get
@@ -253,6 +255,58 @@ PREFIX dcterms: <http://purl.org/dc/terms/>
 CONSTRUCT { ?item dcterms:type <https://notes.example.org/kinds#quotation> }
 WHERE { ?item a rss:item ; rss:title ?title . FILTER(STRSTARTS(?title, "Quoting ")) }
 ```
+
+### A worked mapping: the quote post
+
+A blog's quote post is the case tags cannot classify: `go` on a quote post and `go` on a note
+are the same tag. Its shape is in the HTML: a title `Quoting <name>`, a
+`<blockquote cite="…">` in the summary, then `<p class="cite">— <a href="…">Name</a></p>`.
+[`tests/fixtures/mappings/quotes.example.rq`](tests/fixtures/mappings/quotes.example.rq) maps
+a synthetic feed of that shape ([`tests/fixtures/quote-atom.xml`](tests/fixtures/quote-atom.xml))
+with one CONSTRUCT over the form and `urn:iki:feed:html:{feed}`, and
+[`tests/quote.rs`](tests/quote.rs) holds what it writes (ledger #2675):
+
+```turtle
+<post> dcterms:type <http://quotes.example/kinds#quote> ;     # the post kind
+       dcterms:hasPart <q> ;
+       dcterms:subject <scoped-go> .                          # beside the shared `go` node
+<q> a schema:Quotation ;
+    prov:wasQuotedFrom <http://elsewhere.example/talks/squint> ;   # blockquote/@cite
+    schema:text "Every feed is a graph if you squint." ;
+    schema:creator <agent> .
+<agent> schema:name "Ida Quoted" ; schema:url <http://elsewhere.example/ida> .
+<scoped-go> rdf:value "go" ; dcam:memberOf <http://quotes.example/tags> .
+```
+
+- **The kind is `dcterms:type`.** It has no `rdfs:domain`, and its `rdfs:range` is `rdfs:Class`,
+  so under RDFS it classes the kind, never the post. `rdf:type schema:Quotation` on the post
+  would say the post IS a quotation. It is not: the post holds one. The test holds that the
+  only `rdf:type` the mapping adds is the quotation's.
+- **The quotation is a part, `prov:wasQuotedFrom` its source.** Not `dcterms:source`: the form
+  already writes that for Atom's `link rel="via"`, and a post's via link stays its only one.
+- **The quoted person is not the quoter.** The post's `dc:creator` stays its author. The quoted
+  text sits only on the quotation, whose `schema:creator` is the person the cite paragraph's
+  FIRST link names (a later link, the talk or the post, is not a person). A self-quote is the
+  one case where that person's name is the author's.
+- **Minted nodes are digest IRIs in this crate's form**, computed in SPARQL:
+  `IRI(CONCAT("nih:sha-256;", SHA256(CONCAT("agent\u0000", ?name, "\u0000", ?href, "\u0000"))))`.
+  A quotation is `quotation` over (post, cite), a person `agent` over (name, href).
+- **Tags are scoped by minting, not by annotating.** A scheme-less `go` is one node across
+  every feed by design, so writing `dcam:memberOf` on it would put every source's scheme on
+  everyone's `go`. The mapping instead adds the node the lift itself mints for a category
+  written with the source's scheme (`category` over (scheme, term)), and the shared node stays.
+- **Give each UNION branch its own variables.** A template triple is written for every solution
+  that binds all its variables: with `?item` in both the quote branch and the tag branch, every
+  tagged post gained the quote kind. The test caught exactly that.
+- **The quoted text is joined with `GROUP_CONCAT`**, in the order the evaluator yields the
+  blockquote's text nodes. SPARQL does not order a group, so a blockquote with several
+  text nodes may join them in another order.
+
+The HTML door is lifted for every mapped feed whose host has a mapping, and ikigai-html's
+bounds apply to it (`MAX_HTML_NODES`, 100,000 nodes per predicate across the feed's literals):
+a feed past them fails its mapped read with `OverBudget` rather than being mapped without its
+HTML. A host that maps feeds mounts `ikigai_html::space()`, or a mapped read fails as
+unresolved.
 
 **Rules, each held by a test in `tests/mapped.rs`:**
 
