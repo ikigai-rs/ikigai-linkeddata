@@ -20,8 +20,8 @@ mod mapped;
 mod scan;
 
 pub use mapped::{
-    mapped_space, mappings, source_of, Mappings, GRAPH_TEMPLATE, MAPPED_SPACE_ID, MAPPED_TEMPLATE,
-    MAPPING_FILE, MAPPING_PREFIX,
+    mapped_space, mappings, source_of, Mappings, GRAPH_TEMPLATE, HTML_TEMPLATE, MAPPED_SPACE_ID,
+    MAPPED_TEMPLATE, MAPPING_FILE, MAPPING_PREFIX,
 };
 pub use scan::{ACCEPTED, MAX_FEED_DEPTH};
 

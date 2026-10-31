@@ -9,8 +9,10 @@
 //!   through either cuts a read through either. Nothing else answers the family (sealed), and
 //!   this crate opens no file itself.
 //! - [`mapped_space`] binds `urn:iki:feed:graph:{feed}` (the normalized form of the feed at
-//!   `{feed}`, fetched and lifted) and `urn:iki:feed:mapped:{feed}` (that graph ∪ what the
-//!   host's mapping CONSTRUCTs from it).
+//!   `{feed}`, fetched and lifted), `urn:iki:feed:html:{feed}` (the HTML in that form's
+//!   `rss:description` and `content:encoded` literals, lifted by ikigai-html) and
+//!   `urn:iki:feed:mapped:{feed}` (the normalized graph ∪ what the host's mapping CONSTRUCTs
+//!   from the normalized graph and its HTML together).
 use super::{invalid, lift, serialize, MAX_FEED_BYTES};
 use async_trait::async_trait;
 use ikigai_core::{
@@ -18,6 +20,9 @@ use ikigai_core::{
     FailureClass, Invocation, Iri, ReprType, Representation, Request, Resolution, Scope, Space,
     SpaceEntry, Topology, UriTemplate, Verb,
 };
+use oxrdf::Triple;
+use oxrdfio::{RdfFormat, RdfParser};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// The family a host's mapping files are read under.
@@ -26,12 +31,22 @@ pub const MAPPING_PREFIX: &str = "urn:iki:feed:mapping:";
 pub const MAPPING_FILE: &str = "urn:file:feed/mappings/{source}.rq";
 /// The normalized graph of the feed at `{feed}`.
 pub const GRAPH_TEMPLATE: &str = "urn:iki:feed:graph:{feed}";
+/// The HTML structure of the feed at `{feed}`: ikigai-html's `urn:iki:html:graph` over the
+/// normalized graph's `rss:description` and `content:encoded` literals, each tree hanging on
+/// its item (or channel) by `htm:tree`.
+pub const HTML_TEMPLATE: &str = "urn:iki:feed:html:{feed}";
 /// The normalized graph of the feed at `{feed}`, with its host's mapping applied.
 pub const MAPPED_TEMPLATE: &str = "urn:iki:feed:mapped:{feed}";
 /// The identity claimed by [`mapped_space`].
 pub const MAPPED_SPACE_ID: &str = "urn:iki:space:feed:mapped";
 
 const HTTP_GET: &str = "urn:http:get";
+const HTML_GRAPH: &str = "urn:iki:html:graph";
+/// The form's predicates whose literals are HTML.
+const HTML_PREDICATES: [&str; 2] = [
+    "http://purl.org/rss/1.0/description",
+    "http://purl.org/rss/1.0/modules/content/encoded",
+];
 const XSD_ANY_URI: &str = "http://www.w3.org/2001/XMLSchema#anyURI";
 
 /// The mapping overlay: `urn:iki:feed:mapping:{source}` → `urn:file:feed/mappings/{source}.rq`
@@ -102,16 +117,20 @@ pub fn source_of(feed: &str) -> Option<String> {
     is_source(&host).then_some(host)
 }
 
-/// `urn:iki:feed:graph:{feed}` and `urn:iki:feed:mapped:{feed}`.
+/// `urn:iki:feed:graph:{feed}`, `urn:iki:feed:html:{feed}` and `urn:iki:feed:mapped:{feed}`.
+///
+/// The HTML door issues `urn:iki:html:graph`, so a host mounts `ikigai_html::space()` beside
+/// this one; a mapped feed whose host has a mapping reads it.
 ///
 /// `urn:iki:feed:mapped` is a small function here for now. Once core's reference templates
 /// (ledger #2671) and the engine's names (ledger #2619) ship, it can become a named request:
 /// `urn:rdf:union content=<urn:iki:feed:graph:{feed}> with=<urn:sparql:construct
-/// graph=<urn:iki:feed:graph:{feed}> query=<urn:iki:feed:mapping:{source}>>`, falling back on
-/// the mapping's own `NotFound`.
+/// graph=<urn:iki:feed:graph:{feed}>,<urn:iki:feed:html:{feed}>
+/// query=<urn:iki:feed:mapping:{source}>>`, falling back on the mapping's own `NotFound`.
 pub fn mapped_space() -> EndpointSpace {
     EndpointSpace::new()
         .bind(template(GRAPH_TEMPLATE), FeedAt)
+        .bind(template(HTML_TEMPLATE), FeedHtml)
         .bind(template(MAPPED_TEMPLATE), MappedFeed)
         .named(space_iri("feed:mapped"))
 }
@@ -125,6 +144,12 @@ fn feed_iri(bindings: &Bindings) -> Result<Iri, Error> {
         .get("feed")
         .ok_or_else(|| Error::MissingArgument("feed".into()))?;
     Iri::parse(feed).map_err(|e| invalid("feed", format!("not an IRI: {e}")))
+}
+
+/// A per-feed template filled with the feed's IRI.
+fn at(template: &str, feed: &Iri) -> Result<Iri, Error> {
+    Iri::parse(template.replace("{feed}", feed.as_str()))
+        .map_err(|e| invalid("feed", e.to_string()))
 }
 
 fn feed_input() -> ArgSpec {
@@ -185,9 +210,59 @@ impl Endpoint for FeedAt {
     }
 }
 
+/// `urn:iki:feed:html:{feed}`: one `urn:iki:html:graph` per predicate in `HTML_PREDICATES`
+/// over `urn:iki:feed:graph:{feed}`, unioned, in the form's triple order. Cacheable, hanging
+/// on the normalized graph's thread (so on the fetch's). ikigai-html's bounds apply to each
+/// predicate's literals, and refuse rather than truncate.
+struct FeedHtml;
+
+#[async_trait]
+impl Endpoint for FeedHtml {
+    async fn invoke(&self, inv: &Invocation<'_>) -> ikigai_core::Result<Representation> {
+        let normalized = at(GRAPH_TEMPLATE, &feed_iri(inv.bindings)?)?;
+        let lift = |predicate: &str| {
+            Request::new(Verb::Source, Iri::parse(HTML_GRAPH).unwrap())
+                .with_arg(
+                    "graph",
+                    ArgRef::Inline(normalized.as_str().as_bytes().to_vec()),
+                )
+                .with_arg("predicate", ArgRef::Inline(predicate.as_bytes().to_vec()))
+        };
+        // Unioned here, not through `urn:rdf:union`: a predicate with no literals lifts to an
+        // empty graph, which that door's `with=` reads as neither Turtle nor an IRI.
+        let mut triples = HashSet::new();
+        for predicate in HTML_PREDICATES {
+            let lifted = inv.issue(lift(predicate)).await?;
+            for quad in RdfParser::from_format(RdfFormat::Turtle).for_slice(&lifted.bytes) {
+                let quad = quad.map_err(|e| Error::Endpoint(format!("{HTML_GRAPH}: {e}")))?;
+                triples.insert(Triple::from(quad));
+            }
+        }
+        Ok(turtle(serialize(triples.into_iter().collect())?))
+    }
+
+    fn name(&self) -> &str {
+        "feed-html"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("feed-html")
+            .title("Feed HTML, by feed IRI")
+            .summary(
+                "The HTML in the feed at {feed} (its rss:description and content:encoded \
+                 literals), lifted into structural triples, each tree on its item by htm:tree",
+            )
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(feed_input())
+            .output("text/turtle")
+            .fails(FailureClass::OverBudget)
+    }
+}
+
 /// `urn:iki:feed:mapped:{feed}`: `urn:iki:feed:graph:{feed}` ∪ the CONSTRUCT at
-/// `urn:iki:feed:mapping:{source}` run over it; on the mapping's OWN `NotFound`, the
-/// normalized graph alone.
+/// `urn:iki:feed:mapping:{source}` run over it and `urn:iki:feed:html:{feed}`; on the
+/// mapping's OWN `NotFound`, the normalized graph alone.
 struct MappedFeed;
 
 #[async_trait]
@@ -196,8 +271,8 @@ impl Endpoint for MappedFeed {
         let feed = feed_iri(inv.bindings)?;
         let source = source_of(feed.as_str())
             .ok_or_else(|| invalid("feed", "the feed IRI has no host to key a mapping by"))?;
-        let normalized = Iri::parse(GRAPH_TEMPLATE.replace("{feed}", feed.as_str()))
-            .map_err(|e| invalid("feed", e.to_string()))?;
+        let normalized = at(GRAPH_TEMPLATE, &feed)?;
+        let html = at(HTML_TEMPLATE, &feed)?;
         let mapping = Iri::parse(format!("{MAPPING_PREFIX}{source}")).unwrap();
         // ★ Fall back only on the ATOM's own NotFound (field guide, invalidation trap 1): the
         // mapping is read here, by itself, so the NotFound is the file's and the fallback hangs
@@ -208,12 +283,12 @@ impl Endpoint for MappedFeed {
             Err(Error::NotFound(_)) => return inv.source(&normalized).await,
             Err(e) => return Err(e),
         }
-        // The query by reference: the kernel settles it from the (cached) mapping read.
+        // The query by reference: the kernel settles it from the (cached) mapping read. It
+        // reads the form and its HTML together; only what it constructs joins the form, so
+        // the HTML's own triples never reach the mapped feed.
+        let graphs = format!("{normalized},{html}");
         let construct = Request::new(Verb::Source, Iri::parse("urn:sparql:construct").unwrap())
-            .with_arg(
-                "graph",
-                ArgRef::Inline(normalized.as_str().as_bytes().to_vec()),
-            )
+            .with_arg("graph", ArgRef::Inline(graphs.into_bytes()))
             .with_arg("query", ArgRef::Reference(mapping))
             .with_arg("as", ArgRef::Inline(b"text/turtle".to_vec()));
         let added = inv.issue(construct).await?;
@@ -235,8 +310,8 @@ impl Endpoint for MappedFeed {
             .title("Mapped feed")
             .summary(
                 "The feed at {feed} in the one graph form, plus what its host's mapping \
-                 (urn:iki:feed:mapping:{source}, one SPARQL CONSTRUCT) adds; the form alone \
-                 when the host has no mapping",
+                 (urn:iki:feed:mapping:{source}, one SPARQL CONSTRUCT over the form and \
+                 urn:iki:feed:html:{feed}) adds; the form alone when the host has no mapping",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
