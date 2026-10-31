@@ -38,7 +38,7 @@ use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 use oxrdfio::{RdfFormat, RdfSerializer};
 use scan::{Root, Seen, Source};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// The largest feed admitted, in bytes. Past it the body is refused, not truncated.
 pub const MAX_FEED_BYTES: usize = 8 << 20;
@@ -146,7 +146,7 @@ impl Endpoint for FeedGraph {
             .title("Feed graph form")
             .summary(
                 "An RSS 0.9x/2.0, RSS 1.0 or Atom 1.0 feed lifted into one skolemized RDF \
-                 form: RSS 1.0's vocabulary with Dublin Core, items named by their own IRI",
+                 form: RSS 1.0's vocabulary with Dublin Core, items named within their feed",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
@@ -160,7 +160,7 @@ impl Endpoint for FeedGraph {
                 ArgSpec::new("base")
                     .summary(
                         "the feed's own IRI: names the channel, resolves relative links, and \
-                         seeds the digest IRI of an item with no IRI of its own",
+                         scopes every item IRI to the feed",
                     )
                     .class(XSD_ANY_URI)
                     .optional(),
@@ -195,7 +195,7 @@ fn optional<'a>(inv: &'a Invocation<'_>, name: &str) -> Result<Option<&'a str>> 
 /// Lift a feed's bytes into the form's triples, in no particular order.
 ///
 /// `base` is the feed's own IRI: it names the channel, resolves relative links (beneath any
-/// `xml:base`), and seeds the digest IRI of an item with no IRI of its own. A body that is not
+/// `xml:base`), and scopes every item IRI to the feed. A body that is not
 /// a feed, or nests deeper than [`MAX_FEED_DEPTH`], is [`Error::InvalidArgument`] on `content`.
 pub fn lift(bytes: &[u8], base: Option<&str>) -> Result<Vec<Triple>> {
     let scan = scan::scan(bytes)?;
@@ -222,9 +222,22 @@ pub fn lift(bytes: &[u8], base: Option<&str>) -> Result<Vec<Triple>> {
         .or(scan.channel_lang)
         .map(|l| l.to_lowercase());
     out.channel(&feed, &channel, language.as_deref(), &scan.channel_subjects);
-    for (entry, seen) in feed.entries.iter().zip(&seen) {
-        let item = item_iri(entry, seen, scan.root, &channel);
-        out.item(entry, seen, scan.root, &item, &channel, language.as_deref());
+    let named: Vec<NamedNode> = feed
+        .entries
+        .iter()
+        .zip(&seen)
+        .map(|(entry, seen)| item_iri(entry, seen, scan.root, &channel))
+        .collect();
+    for i in kept(&feed.entries, &named) {
+        let (entry, seen) = (&feed.entries[i], &seen[i]);
+        out.item(
+            entry,
+            seen,
+            scan.root,
+            &named[i],
+            &channel,
+            language.as_deref(),
+        );
     }
     Ok(out.0.into_iter().collect())
 }
@@ -289,13 +302,16 @@ fn channel_iri(feed: &Feed, base: Option<&str>, root: Root, about: Option<&str>)
         .unwrap_or_else(|| digest("channel", &[text(&feed.title).unwrap_or("")]))
 }
 
-/// The item IRI rule, in order (the README states it):
+/// The item IRI: a digest IRI over the channel IRI and the item's key, so an item is named
+/// within the feed it was lifted from (ledger #2707). A key another feed reuses (an `atom:id`,
+/// a guid, a link) names that feed's own item, and attaches nothing to this one's. The key, in
+/// order (the README states the rule):
 ///
 /// 1. the entry's own IRI: Atom's `atom:id`, RSS 1.0's `rdf:about`, when absolute;
 /// 2. an RSS `guid` with `isPermaLink="true"`, or with no `isPermaLink` when it is an
-///    absolute IRI (`isPermaLink="false"` never names the item);
+///    absolute IRI (`isPermaLink="false"` never keys the item);
 /// 3. the item's link;
-/// 4. a digest IRI over the channel IRI, the title and the date.
+/// 4. none: the digest is over the channel IRI, the title and the date instead.
 fn item_iri(entry: &Entry, seen: &Seen, root: Root, channel: &NamedNode) -> NamedNode {
     let own = match root {
         Root::Atom => absolute(&entry.id),
@@ -303,8 +319,9 @@ fn item_iri(entry: &Entry, seen: &Seen, root: Root, channel: &NamedNode) -> Name
         Root::Rss if seen.permalink != Some(false) => absolute(&entry.id),
         Root::Rss => None,
     };
-    own.or_else(|| alternate(&entry.links).and_then(|l| absolute(&l.href)))
-        .unwrap_or_else(|| {
+    match own.or_else(|| alternate(&entry.links).and_then(|l| absolute(&l.href))) {
+        Some(key) => digest("item", &[channel.as_str(), key.as_str()]),
+        None => {
             let date = entry.published.or(entry.updated).map(date_time);
             digest(
                 "item",
@@ -314,7 +331,31 @@ fn item_iri(entry: &Entry, seen: &Seen, root: Root, channel: &NamedNode) -> Name
                     date.as_deref().unwrap_or(""),
                 ],
             )
-        })
+        }
+    }
+}
+
+/// The entries lifted, in document order: of the entries one IRI names, only the most recently
+/// updated (`updated`, else `published`; an entry with neither is the oldest), the first in
+/// document order on a tie. RFC 4287 section 4.1.1 reads entries sharing an `atom:id` as
+/// versions of one entry; lifting them all would give one item every version's title, link
+/// and date, and a river query their product.
+fn kept(entries: &[Entry], named: &[NamedNode]) -> Vec<usize> {
+    let mut latest: HashMap<&NamedNode, usize> = HashMap::new();
+    let when = |i: usize| entries[i].updated.or(entries[i].published);
+    for (i, item) in named.iter().enumerate() {
+        latest
+            .entry(item)
+            .and_modify(|kept| {
+                if when(i) > when(*kept) {
+                    *kept = i;
+                }
+            })
+            .or_insert(i);
+    }
+    let mut kept: Vec<usize> = latest.into_values().collect();
+    kept.sort_unstable();
+    kept
 }
 
 /// The first link with no `rel` or `rel="alternate"`, and no other role (comments).

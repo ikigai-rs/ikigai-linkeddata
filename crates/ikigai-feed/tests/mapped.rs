@@ -12,6 +12,7 @@ use ikigai_core::{
     Representation, Request, Space, Verb,
 };
 use oxrdf::Triple;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -149,6 +150,17 @@ fn parse(bytes: &[u8]) -> HashSet<Triple> {
         .collect()
 }
 
+/// The IRI of the item `key` names in the feed at `feed`, by the README's digest rule.
+fn item(feed: &str, key: &str) -> String {
+    let mut hash = Sha256::new();
+    for part in ["item", feed, key] {
+        hash.update(part.as_bytes());
+        hash.update([0]);
+    }
+    let hex: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    format!("nih:sha-256;{hex}")
+}
+
 /// The `dcterms:type` triples of a graph, as `(item, kind)`.
 fn kinds(g: &HashSet<Triple>) -> Vec<(String, String)> {
     let mut found: Vec<_> = g
@@ -191,7 +203,7 @@ fn creating_a_mapping_through_a_sink_maps_the_next_read_with_no_restart() {
     assert_eq!(
         kinds(&host.graph(mapped(A))),
         [(
-            "<http://a.example/1>".to_string(),
+            format!("<{}>", item(A, "http://a.example/1")),
             "<urn:example:kind:quotation>".to_string()
         )]
     );
