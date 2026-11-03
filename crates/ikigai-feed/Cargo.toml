@@ -29,7 +29,8 @@ sha2 = "0.10"
 futures = "0.3"
 ikigai-conformance = "0.14.0"
 # tests/mapped.rs mounts a config-home root as a host does: mappings are files it serves.
-ikigai-fs = "0.3"
+# 0.4.0 is ikigai-fs on ikigai-core 0.3 (ledger #2965); 0.3 links the old core beside this one.
+ikigai-fs = "0.4.0"
 # tests/quote.rs maps a quote post through the HTML lift a host mounts beside this crate.
 ikigai-html = { path = "../ikigai-html" }
 # tests/river.rs runs the Book's river query over the form. `rdf-12` because sibling test
