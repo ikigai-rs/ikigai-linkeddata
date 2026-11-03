@@ -21,7 +21,7 @@ sha2 = "0.10"
 
 [dev-dependencies]
 futures = "0.3"
-ikigai-conformance = "0.12.0"
+ikigai-conformance = "0.14.0"
 # tests/lift.rs selects from the lift with SPARQL. `rdf-12` because sibling test builds turn
 # oxrdf's on, and an rdf-12 oxrdf builds spargebra only with it (ikigai-reason's note).
 ikigai-sparql = { path = "../ikigai-sparql", features = ["rdf-12"] }

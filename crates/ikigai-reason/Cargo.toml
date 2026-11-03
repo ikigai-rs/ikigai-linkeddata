@@ -26,7 +26,7 @@ futures = "0.3"
 # examples/choosing.rs measures a SPARQL property path beside the reasoner (ledger #2640).
 # Its `rdf-12` matches the oxrdf variant the dev build already turns on below.
 ikigai-sparql = { path = "../ikigai-sparql", features = ["rdf-12"] }
-ikigai-conformance = "0.12.0"
+ikigai-conformance = "0.14.0"
 # Sibling test builds enable oxrdf/rdf-12; reasonable must see that variant too.
 reasonable = { version = "0.4.4", features = ["rdf-12"] }
 # Standalone crate tests need the parsers' matching arms as well.

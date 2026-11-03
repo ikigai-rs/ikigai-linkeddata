@@ -56,4 +56,4 @@ oxrdfio = { workspace = true, features = ["rdf-12"] }
 # Path-only: a dev-dependency without a version is dropped from the published manifest.
 ikigai-sniff = { path = "../ikigai-sniff" }
 # The module recipe walks every bound endpoint, including BODIES and BODY-INPUTS.
-ikigai-conformance = "0.12.0"
+ikigai-conformance = "0.14.0"
