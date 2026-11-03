@@ -57,7 +57,7 @@ futures = "0.3"
 # workspace test build, so without this line `cargo test --workspace` fails in spargebra.
 oxigraph = { workspace = true, features = ["rdf-12"] }
 # The module recipe walks every bound endpoint, including BODIES and BODY-INPUTS.
-ikigai-conformance = "0.12.0"
+ikigai-conformance = "0.14.0"
 
 # Oxigraph's `js` feature wires getrandom's wasm backend (paired with the
 # getrandom_backend cfg in .cargo/config.toml), so the store/query run in the browser.
