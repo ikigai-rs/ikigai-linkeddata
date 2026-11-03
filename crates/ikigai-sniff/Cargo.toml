@@ -18,4 +18,4 @@ futures-util = { version = "0.3", default-features = false }
 [dev-dependencies]
 futures = "0.3"
 # The module recipe walks every bound endpoint, including BODIES and BODY-INPUTS.
-ikigai-conformance = "0.12.0"
+ikigai-conformance = "0.14.0"
