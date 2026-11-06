@@ -30,6 +30,8 @@
 //!   uncacheable by design (see [`ikigai_sparql::UPDATE_THREAD`] for why a
 //!   partially-covered thread would be worse). The suite's probe has nothing to
 //!   hold them to, and that is the intended outcome, not a gap.
+//! - Shared-store query actions require `urn:cap:sparql:query`; ENFORCED checks
+//!   denial without read authority on all four forms, including custom mounts.
 //! - `sparql-update` is a `Sink` with `requires urn:cap:sparql:update`. ENFORCED
 //!   fires it under a capability holding no grants and expects `Denied`;
 //!   PIPELINE fires it under root with the fixture's `content` and expects the
@@ -53,6 +55,7 @@
 //! built, so only the host names them, and the suite holds each to claiming nothing.
 //!
 //! No opt-outs, no module namespace, and NAMES runs: every id is kebab-case.
+//! Custom mounts encode the prefix in their IDs and run the same recipe.
 
 use ikigai_conformance::{Fixture, Report, Suite};
 use ikigai_core::{Kernel, Verb};
@@ -180,4 +183,33 @@ fn shared_store_conforms() {
         seeded + 1,
         "the pipeline probe's INSERT landed exactly once"
     );
+}
+
+#[test]
+fn caller_owned_mount_conforms() {
+    use ikigai_core::Space;
+
+    let store = Arc::new(Store::new().unwrap());
+    load_vocabulary(&store).unwrap();
+    let space = Arc::new(ikigai_sparql::space_with_store_at("urn:host:store:", store));
+    let mut suite = Suite::new().body_space(space.clone()).host_named_space(
+        "ikigai_sparql::space_with_store_at(prefix, store)",
+        space.clone(),
+    );
+    for entry in space.entries().unwrap() {
+        let fixture = if entry.pattern.ends_with("update") {
+            Fixture::new(&entry.endpoint, Verb::Sink).arg("content", INSERT)
+        } else {
+            let (_, query) = FORMS
+                .iter()
+                .find(|(id, _)| entry.pattern.ends_with(id.strip_prefix("sparql-").unwrap()))
+                .unwrap();
+            Fixture::new(&entry.endpoint, Verb::Source).arg("query", *query)
+        };
+        suite = suite.fixture(fixture);
+    }
+    let kernel = Kernel::new(space);
+    let report = suite.run_blocking(&kernel);
+    assert!(report.is_clean(), "{report}");
+    assert_shape(&report, FORMS.len() + 1);
 }

@@ -141,6 +141,33 @@ let kernel = Kernel::new(Arc::new(space_with_store(Arc::clone(&store))));
 // …other modules write through `store`; urn:sparql:* queries see it live.
 ```
 
+To mount the same five endpoints under a namespace the host owns:
+
+```rust
+let shared = ikigai_sparql::space_with_store_at("urn:host:store:", Arc::clone(&store));
+// Binds urn:host:store:{select,ask,construct,describe,update}.
+```
+
+The form name is appended verbatim; include the separator (`:`, `/`, or `#`) in the
+prefix. `space_with_store_at_and_budget` and `space_with_store_at_and_bounds` also set
+host ceilings, with the same arguments as their existing counterparts after `prefix`.
+These spaces stay anonymous. Each custom mount uses `sparql-{hex-prefix}-{form}` description
+IDs (the prefix encoded as UTF-8 bytes in lowercase hex), allowing multiple stores to
+coexist in a catalog without punctuation collisions; `urn:sparql:` keeps the existing
+`sparql-{form}` IDs. Successful updates cut the thread named after the mounted update
+IRI; `UPDATE_THREAD` names only the default `urn:sparql:update` target.
+
+**Read-authority migration:** all shared-store constructors, including the existing
+ones, now require `urn:cap:sparql:query` (`CAP_QUERY`) for the four query forms. Existing
+scoped callers must add this scope; root callers already satisfy it. It grants read
+access to every graph in every shared-store mount in the kernel. The existing
+`urn:cap:sparql:update` (`CAP_UPDATE`) scope likewise grants write access across mounts.
+Neither scope implies the other, and changing the prefix does not narrow either scope.
+Hosts that need per-store permissions must enforce those at their boundary. The kernel
+enforces the scopes from the endpoint declarations; direct invocation outside the
+kernel does not. Federated `space()` queries retain their existing behavior: source
+resolution uses the caller's own capabilities, with no additional shared-store scope.
+
 The contract differs deliberately from `space()`:
 
 - **The caller owns the store's contents and lifecycle.** Nothing is auto-loaded — not
