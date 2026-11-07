@@ -40,7 +40,9 @@
 //! [`UPDATE_THREAD`] for what that does and does not buy). The caller owns the store's
 //! contents and lifecycle (nothing auto-loaded; [`load_vocabulary`] is the opt-in),
 //! `graph=` is not offered, and results are uncacheable (live data, and still a
-//! partially-covered golden thread). [`space`]'s behavior is unchanged.
+//! partially-covered golden thread). Reads require [`CAP_QUERY`]; writes require
+//! [`CAP_UPDATE`]. [`space_with_store_at`] mounts these endpoints under a caller-owned
+//! prefix. [`space`]'s behavior is unchanged.
 //!
 //! **Caller SPARQL is bounded before it is parsed** (ledger #962). Oxigraph's parser and
 //! evaluator are recursive and a stack overflow aborts the whole host, so every door that
@@ -149,7 +151,7 @@ pub fn space_with_bounds(ceiling: Duration, answer: budget::AnswerBound) -> Endp
             Exact::new(format!("urn:sparql:{verb}")),
             SparqlEndpoint {
                 verb,
-                id,
+                id: id.to_string(),
                 shared: None,
                 ceiling,
                 answer,
@@ -175,6 +177,8 @@ pub fn space_with_bounds(ceiling: Duration, answer: budget::AnswerBound) -> Endp
 ///   would mutate the shared store permanently; per-query federation is [`space`]'s
 ///   job. Passing `graph=` is an error, and `describe()` doesn't offer it (the
 ///   manifold must not over-offer).
+/// - **All four queries require [`CAP_QUERY`]**, granting read access to the entire store.
+///   Existing scoped callers must add this scope; federated [`space`] is unchanged.
 /// - **`urn:sparql:update` is capability-gated** on [`CAP_UPDATE`], and that scope is
 ///   coarse on purpose — read its docs before handing it out; it includes `DROP ALL`.
 /// - **Query semantics differ from update semantics, by design.** A *query*'s default
@@ -204,6 +208,8 @@ pub fn space_with_bounds(ceiling: Duration, answer: budget::AnswerBound) -> Endp
 ///   goes through the kernel, or a freshness watcher cuts [`UPDATE_THREAD`] on any
 ///   change to it.
 ///
+/// Use [`space_with_store_at`] to choose another endpoint namespace.
+///
 /// Every evaluation, the update's included, runs under [`budget::DEFAULT_BUDGET`];
 /// [`space_with_store_and_budget`] sets another.
 pub fn space_with_store(store: Arc<Store>) -> EndpointSpace {
@@ -224,26 +230,90 @@ pub fn space_with_store_and_bounds(
     ceiling: Duration,
     answer: budget::AnswerBound,
 ) -> EndpointSpace {
+    space_with_store_at_and_bounds("urn:sparql:", store, ceiling, answer)
+}
+
+/// Mount the five shared-store endpoints under a caller-owned IRI prefix.
+///
+/// The form name is appended verbatim: `"urn:host:store:"` binds
+/// `urn:host:store:select`, `:ask`, `:construct`, `:describe`, and `:update`.
+/// Include the desired separator in `prefix`; no separator is added or removed.
+/// Descriptions have mount-specific kebab-case identities (`sparql-{hex-prefix}-{form}`),
+/// so multiple stores can be composed without catalog collisions. The default prefix
+/// retains the existing identities.
+///
+/// All shared-store constructors require [`CAP_QUERY`] for reads and [`CAP_UPDATE`]
+/// for writes, regardless of prefix. These are coarse scopes across all mounts in a
+/// kernel, not per-store permissions. A host needing per-store authorization must
+/// enforce that policy at its boundary rather than minting these scopes to callers.
+/// Results, dataset semantics, and store ownership follow [`space_with_store`].
+/// A successful update cuts the thread named after its mounted target IRI, not
+/// necessarily [`UPDATE_THREAD`]. This space is anonymous, like other `space_with_*`.
+pub fn space_with_store_at(prefix: &str, store: Arc<Store>) -> EndpointSpace {
+    space_with_store_at_and_budget(prefix, store, budget::DEFAULT_BUDGET)
+}
+
+/// [`space_with_store_at`] with a host-selected time budget ceiling.
+pub fn space_with_store_at_and_budget(
+    prefix: &str,
+    store: Arc<Store>,
+    ceiling: Duration,
+) -> EndpointSpace {
+    space_with_store_at_and_bounds(prefix, store, ceiling, budget::AnswerBound::DEFAULT)
+}
+
+/// [`space_with_store_at_and_budget`] with a host-selected answer-size bound.
+/// Requests can only lower these limits; see [`space_with_bounds`].
+pub fn space_with_store_at_and_bounds(
+    prefix: &str,
+    store: Arc<Store>,
+    ceiling: Duration,
+    answer: budget::AnswerBound,
+) -> EndpointSpace {
     let mut space = EndpointSpace::new();
     for (verb, id) in FORMS {
         space = space.bind(
-            Exact::new(format!("urn:sparql:{verb}")),
+            Exact::new(format!("{prefix}{verb}")),
             SparqlEndpoint {
                 verb,
-                id,
+                id: mounted_id(prefix, verb, id),
                 shared: Some(Arc::clone(&store)),
                 ceiling,
                 answer,
             },
         );
     }
-    // The fifth IRI, bound ONLY here: an update needs somewhere durable to write, and
-    // only the shared store is durable (see [`space`]).
     space.bind(
-        Exact::new("urn:sparql:update"),
-        SparqlUpdateEndpoint { store, ceiling },
+        Exact::new(format!("{prefix}update")),
+        SparqlUpdateEndpoint {
+            id: mounted_id(prefix, "update", "sparql-update"),
+            store,
+            ceiling,
+        },
     )
 }
+
+fn mounted_id(prefix: &str, form: &str, default: &str) -> String {
+    if prefix == "urn:sparql:" {
+        default.to_owned()
+    } else {
+        // Encode every byte rather than replacing punctuation: prefixes that differ
+        // only in separators must not collapse to the same catalog/tool identity.
+        let namespace: String = prefix.bytes().map(|byte| format!("{byte:02x}")).collect();
+        format!("sparql-{namespace}-{form}")
+    }
+}
+
+/// Read authority for the entire caller-owned store, enforced by the kernel from
+/// the shared-store query endpoints' declarations. This includes every named graph
+/// and applies to all shared-store mounts, regardless of prefix. Grant it only to
+/// callers allowed to read all of those stores. It grants no write authority.
+///
+/// Migration: callers of existing shared-store constructors now need this scope
+/// (or root authority). Federated [`space`] queries do not require it: their sources
+/// are resolved through the kernel under the caller's own capabilities instead.
+/// Direct invocation outside the kernel does not enforce capability declarations.
+pub const CAP_QUERY: &str = "urn:cap:sparql:query";
 
 /// The capability `urn:sparql:update` requires — and the kernel enforces, because it is
 /// declared (`Description::requires` ⇒ `enforce_requires`, checked before `invoke` and
@@ -257,7 +327,8 @@ pub fn space_with_store_and_bounds(
 /// and `INSERT DATA` writes any triple into any graph. Holding this scope is therefore
 /// equivalent to holding write-everything-and-erase-everything on whatever store the
 /// host bound. The name is deliberately unqualified so nothing about it suggests
-/// otherwise.
+/// otherwise. The scope applies across all shared-store mounts in a kernel, including
+/// those built with [`space_with_store_at`]; a prefix does not narrow this authority.
 ///
 /// A finer shape is designable — the parsed update exposes its operation list, so an
 /// endpoint could gate `DROP`/`CLEAR`/`LOAD` apart from `INSERT`, or hold a graph
@@ -455,12 +526,12 @@ fn merge_into_default_graph(store: &Store) -> Result<()> {
 
 /// One SPARQL query form bound to `urn:sparql:{verb}`. Resolution is identical across all
 /// four (the query itself carries the form); only the *identity* differs — `id` is a
-/// UNIQUE description id (`sparql-select`/`…-ask`/`…-describe`/`…-construct`) so the catalog
+/// unique, mount-specific description id (`sparql-{form}` at the default prefix) so the catalog
 /// subject (`urn:ikigai:endpoint:{id}`) and any id-keyed projection (an MCP tool name)
 /// stay distinct. `verb` is the bare form, used only to label the title.
 struct SparqlEndpoint {
     verb: &'static str,
-    id: &'static str,
+    id: String,
     /// `Some` = the shared-store variant ([`space_with_store`]): query the given live
     /// store, uncacheable, no `graph=`. `None` = the classic per-query dataset.
     shared: Option<Arc<Store>>,
@@ -581,7 +652,7 @@ impl Endpoint for SparqlEndpoint {
     }
 
     fn name(&self) -> &str {
-        self.id
+        &self.id
     }
 
     fn describe(&self) -> Description {
@@ -593,7 +664,7 @@ impl Endpoint for SparqlEndpoint {
         } else {
             &RESULTS_OUTPUTS
         };
-        let desc = Description::new(self.id)
+        let desc = Description::new(&self.id)
             .title(format!("SPARQL {}", self.verb.to_uppercase()))
             .verb(Verb::Source)
             .verb(Verb::Meta)
@@ -606,7 +677,7 @@ impl Endpoint for SparqlEndpoint {
         // `graph=` (it would mutate the caller-owned store), and advertising it here
         // would make the manifold over-offer.
         let desc = if self.shared.is_some() {
-            desc.summary(
+            desc.requires(CAP_QUERY).summary(
                 "Run a SPARQL query over the host's shared live RDF store (the graph other \
                  modules write through the same store handle). Live data: uncacheable.",
             )
@@ -700,8 +771,9 @@ impl Endpoint for SparqlEndpoint {
 /// `INSERT DATA` built from it.
 ///
 /// The result is uncacheable (a Sink's result is never cached anyway) and the kernel
-/// cuts [`UPDATE_THREAD`] on success.
+/// cuts the mounted update target's thread on success ([`UPDATE_THREAD`] at the default prefix).
 struct SparqlUpdateEndpoint {
+    id: String,
     store: Arc<Store>,
     /// The most time one update may take; a request's `budget=` can only lower it.
     ceiling: Duration,
@@ -714,7 +786,7 @@ impl Endpoint for SparqlUpdateEndpoint {
         // per-query federation model in mind, and this endpoint has none to offer.
         if inv.inline_str("graph").is_ok_and(|g| !g.trim().is_empty()) {
             return Err(Error::Endpoint(
-                "`graph=` is not supported by urn:sparql:update: an update writes to the \
+                "`graph=` is not supported by SPARQL UPDATE: an update writes to the \
                  caller-owned shared store, and a per-query dataset would be discarded when \
                  the call returns. Drop `graph=`, or address a named graph from inside the \
                  update with `GRAPH <uri> { … }`."
@@ -742,7 +814,7 @@ impl Endpoint for SparqlUpdateEndpoint {
             "content"
         };
         limits::check_sparql(update_str, arg)?;
-        bindings::refuse(inv, "urn:sparql:update")?;
+        bindings::refuse(inv, inv.request.target.as_str())?;
         let budget = budget::effective_budget(budget::inline_bound(inv, "budget")?, self.ceiling)?;
 
         let before = self
@@ -823,16 +895,16 @@ impl Endpoint for SparqlUpdateEndpoint {
     }
 
     fn name(&self) -> &str {
-        "sparql-update"
+        &self.id
     }
 
     fn describe(&self) -> Description {
-        Description::new("sparql-update")
+        Description::new(&self.id)
             .title("SPARQL UPDATE")
             .summary(
                 "Apply a SPARQL 1.1 UPDATE to the host's shared live RDF store, in one \
-                 transaction (all operations commit, or none do). The only writing verb in \
-                 urn:sparql:*. Plain SPARQL dataset semantics: the default graph is the \
+                 transaction (all operations commit, or none do). The store's writing endpoint. \
+                 Plain SPARQL dataset semantics: the default graph is the \
                  store's default graph, not the union the query endpoints use — address a \
                  named graph with GRAPH <uri> { … }.",
             )
@@ -856,7 +928,7 @@ impl Endpoint for SparqlUpdateEndpoint {
             )
             .input(
                 ArgSpec::new("content")
-                    .summary("the SPARQL UPDATE text as piped content — the `… | urn:sparql:update` form")
+                    .summary("the SPARQL UPDATE text as piped content")
                     .class(XSD_STRING)
                     .optional(),
             )
@@ -1591,7 +1663,7 @@ mod tests {
                 [None, Some(Arc::clone(&store))].map(|shared| {
                     SparqlEndpoint {
                         verb,
-                        id,
+                        id: id.to_string(),
                         shared,
                         ceiling,
                         answer: budget::AnswerBound::DEFAULT,
@@ -1600,7 +1672,14 @@ mod tests {
                 })
             })
             .collect();
-        descriptions.push(SparqlUpdateEndpoint { store, ceiling }.describe());
+        descriptions.push(
+            SparqlUpdateEndpoint {
+                id: "sparql-update".to_owned(),
+                store,
+                ceiling,
+            }
+            .describe(),
+        );
         for desc in descriptions {
             let arg = desc
                 .inputs
@@ -1622,7 +1701,7 @@ mod tests {
             for shared in [None, Some(Arc::clone(&store))] {
                 let desc = SparqlEndpoint {
                     verb,
-                    id,
+                    id: id.to_string(),
                     shared,
                     ceiling: budget::DEFAULT_BUDGET,
                     answer: budget::AnswerBound::DEFAULT,
@@ -1638,6 +1717,7 @@ mod tests {
             }
         }
         let update = SparqlUpdateEndpoint {
+            id: "sparql-update".to_owned(),
             store,
             ceiling: budget::DEFAULT_BUDGET,
         }
@@ -1655,7 +1735,7 @@ mod tests {
             for shared in [None, Some(Arc::clone(&store))] {
                 let desc = SparqlEndpoint {
                     verb,
-                    id,
+                    id: id.to_string(),
                     shared,
                     ceiling: budget::DEFAULT_BUDGET,
                     answer,
@@ -1674,6 +1754,7 @@ mod tests {
             }
         }
         let update = SparqlUpdateEndpoint {
+            id: "sparql-update".to_owned(),
             store,
             ceiling: budget::DEFAULT_BUDGET,
         }
@@ -1693,7 +1774,7 @@ mod tests {
             .iter()
             .map(|(verb, id)| SparqlEndpoint {
                 verb,
-                id,
+                id: id.to_string(),
                 shared: None,
                 ceiling: budget::DEFAULT_BUDGET,
                 answer: budget::AnswerBound::DEFAULT,
@@ -1716,7 +1797,7 @@ mod tests {
         // both have working defaults, so only `query` may be required (F5).
         let desc = SparqlEndpoint {
             verb: "select",
-            id: "sparql-select",
+            id: "sparql-select".to_owned(),
             shared: None,
             ceiling: budget::DEFAULT_BUDGET,
             answer: budget::AnswerBound::DEFAULT,
@@ -2187,7 +2268,7 @@ mod tests {
             // Manifold: the shared-store describe() must not offer `graph=` (over-offer).
             let desc = SparqlEndpoint {
                 verb: "select",
-                id: "sparql-select",
+                id: "sparql-select".to_owned(),
                 shared: Some(Arc::clone(&store)),
                 ceiling: budget::DEFAULT_BUDGET,
                 answer: budget::AnswerBound::DEFAULT,
@@ -2386,6 +2467,7 @@ mod tests {
         fn the_sink_action_declares_the_scope_the_kernel_enforces() {
             let store = Arc::new(Store::new().unwrap());
             let desc = SparqlUpdateEndpoint {
+                id: "sparql-update".to_owned(),
                 store,
                 ceiling: budget::DEFAULT_BUDGET,
             }
@@ -2494,6 +2576,7 @@ mod tests {
 
             // The manifold must not offer it either.
             let desc = SparqlUpdateEndpoint {
+                id: "sparql-update".to_owned(),
                 store: Arc::clone(&store),
                 ceiling: budget::DEFAULT_BUDGET,
             }
@@ -2922,7 +3005,7 @@ mod tests {
         fn endpoint(shared: Option<Arc<Store>>) -> SparqlEndpoint {
             SparqlEndpoint {
                 verb: "select",
-                id: "sparql-select",
+                id: "sparql-select".to_owned(),
                 shared,
                 ceiling: Duration::from_secs(60),
                 answer: budget::AnswerBound::DEFAULT,
