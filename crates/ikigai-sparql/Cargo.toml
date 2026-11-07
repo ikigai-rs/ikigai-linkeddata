@@ -18,7 +18,9 @@ ikigai-vocab = { workspace = true }
 # but ikigai-rdf itself: every crate it pulls in (oxrdfio, oxrdf, quick-xml at oxrdfxml's line)
 # is already here through oxigraph, natively and on wasm32 (`cargo tree`, 2026-10-10).
 ikigai-rdf = { workspace = true }
-oxigraph = { workspace = true }
+# Match RDF 1.2 terms enabled by sibling modules such as ikigai-reason,
+# including default-feature workspace documentation and wasm library builds.
+oxigraph = { workspace = true, features = ["rdf-12"] }
 # The parser oxigraph itself uses, named directly so a query's ALGEBRA can be measured
 # against the time budget's bounds before oxigraph plans it (ledger #964): planning cannot be
 # cancelled. Its type must be the one oxigraph converts from (`for_query`/`for_update`), and
@@ -41,21 +43,14 @@ serde_json = "1"
 # under it in CI's `features:` job and proves SERVICE and LOAD still reach no network. Turning it
 # on gives a consumer nothing: no door here uses the client, which is the point.
 http-client-probe = ["oxigraph/http-client"]
-# RDF 1.2 (ledger #1575): `ikigai-rdf/rdf-12`, so a source's blank nodes inside triple terms are
-# relabeled as it loads and a CONSTRUCT's are labeled by structure, and `oxigraph/rdf-12` with
-# it, because an rdf-12 oxrdf does not compile oxigraph's own crates (sparesults, spargebra)
-# unless oxigraph turns their RDF 1.2 support on too. One feature, so a host cannot turn on half.
+# RDF 1.2 (ledger #1575): relabel source blank nodes inside triple terms and
+# label CONSTRUCT triple terms by structure. Oxigraph's RDF 1.2 adapter support
+# is always enabled so sibling dependencies cannot make its matches incomplete.
 rdf-12 = ["ikigai-rdf/rdf-12", "oxigraph/rdf-12"]
 
 [dev-dependencies]
 # block_on for driving kernel.issue in the shared-store tests.
 futures = "0.3"
-# RDF 1.2 ON in the tests, as it is in ikigai-cli, where rudof turns on `oxigraph/rdf-12`. Needed
-# for the WORKSPACE to build at all now that ikigai-rdf's tests turn on `oxrdfio/rdf-12` (ledger
-# #992): that reaches oxrdf, and spargebra 0.4.7 does not compile against an rdf-12 oxrdf unless
-# its own `sparql-12` is on too, which only oxigraph's `rdf-12` brings. Features unify across a
-# workspace test build, so without this line `cargo test --workspace` fails in spargebra.
-oxigraph = { workspace = true, features = ["rdf-12"] }
 # The module recipe walks every bound endpoint, including BODIES and BODY-INPUTS.
 ikigai-conformance = "0.14.0"
 
