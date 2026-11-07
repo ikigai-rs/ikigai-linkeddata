@@ -67,9 +67,6 @@ Found by reading the source on 2026-10-31, not by testing:
 - Several errors name neither the endpoint nor the argument, only the stage and the parser's
   message: for example `RDF parse error: …`, `RDF serialize error: …`, `serialize: …`,
   `query: …` and `store init: …`.
-- A few refusals in `ikigai-sparql` cite an internal work-item number in parentheses (in
-  `src/budget.rs`, the time-budget, answer-size and bound-argument refusals; in `src/egress.rs`,
-  the `SERVICE` refusal), which a reader outside the project cannot look up.
 - The table's caption reads `1 triples` for a one-triple graph.
 - The table fragment states no language; its English header words take the host page's
   language.
@@ -96,3 +93,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-li
 | Date | Change |
 |---|---|
 | 2026-10-31 | First version. |
+| 2026-11-07 | Removed internal work-item numbers from SPARQL refusals and moved remedies first. |
