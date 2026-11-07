@@ -264,7 +264,6 @@ fn parse_source(
             if triples.len() == remaining {
                 return Err(over("input", limit));
             }
-            #[cfg(feature = "rdf-12")]
             if matches!(quad.object, oxrdf::Term::Triple(_)) {
                 return Err(invalid(
                     "graph",

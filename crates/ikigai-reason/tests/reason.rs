@@ -365,7 +365,6 @@ fn http_graphs_are_resolved_through_the_kernel() {
     assert!(!k.is_cached(&req, &Capability::root()));
 }
 
-#[cfg(feature = "rdf-12")]
 #[test]
 fn rdf12_triple_terms_are_a_typed_refusal() {
     let k = with_graph("ex:x ex:p <<(ex:a ex:q ex:b)>> .");

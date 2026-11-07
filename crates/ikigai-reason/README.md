@@ -94,11 +94,15 @@ The crate compiles for `wasm32-unknown-unknown` with the workspace's
 `getrandom_backend="wasm_js"` configuration and `getrandom/wasm_js` feature.
 CI checks wasm library Clippy; this is a compile check, not a browser runtime test.
 
-Hosts enabling RDF 1.2 elsewhere in their dependency graph must also enable
-`ikigai-reason/rdf-12` (and `ikigai-sparql/rdf-12` when using SPARQL), so all
-crates agree on oxrdf's term variants. Reasoning is RDF 1.1: triple terms are
-refused with `InvalidArgument`, rather than passed into the engine's RDF-star
-unsupported paths.
+RDF 1.2 adapter support is always enabled, including when a sibling dependency
+turns on RDF 1.2. Hosts do not need to enable `ikigai-reason/rdf-12`; that feature
+remains as a compatibility alias. Hosts using SPARQL still enable
+`ikigai-sparql/rdf-12` when their dependency graph enables RDF 1.2.
+Reasoning is RDF 1.1: triple terms are refused with `InvalidArgument` on `graph`
+before reaching the engine's unsupported RDF-star paths.
+
+CI also tests an isolated host crate with RDF 1.2 enabled through sibling
+`ikigai-rdf` and no reasoner features, checking compilation and typed refusal.
 
 Small fixtures cover subclass chains, subproperties, domain/range, inverse,
 equivalent classes/sameAs, and SKOS transitivity. Other tests cover exact inferred
