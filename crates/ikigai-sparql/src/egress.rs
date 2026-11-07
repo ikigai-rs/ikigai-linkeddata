@@ -71,12 +71,12 @@ pub(crate) fn check_update(update: &Update, arg: &str) -> Result<()> {
                 return Err(Error::InvalidArgument {
                     name: arg.to_string(),
                     detail: format!(
-                        "this SPARQL update has LOAD {source}, and this endpoint refuses LOAD \
+                        "Pull the document in through the kernel (urn:http:get, which urn:cap:net:* gates) \
+                         and sink an INSERT DATA built from it. This SPARQL update has LOAD {source}, \
+                         and this endpoint refuses LOAD \
                          before evaluation: the fetch would be oxigraph's own HTTP request, made \
-                         outside the kernel where no urn:cap:net:* is consulted (ledger #1083). \
-                         No grant changes this. Pull the document in through the kernel instead \
-                         (urn:http:get, which urn:cap:net:* gates) and sink an INSERT DATA built \
-                         from it. Nothing was applied"
+                         outside the kernel where no urn:cap:net:* is consulted. \
+                         No grant changes this. Nothing was applied"
                     ),
                 });
             }
@@ -95,11 +95,11 @@ fn refuse_service(service: &str, arg: &str) -> Error {
     Error::InvalidArgument {
         name: arg.to_string(),
         detail: format!(
-            "this SPARQL text calls SERVICE {service}, and this endpoint refuses SERVICE before \
+            "Federate through the kernel: list the remote graph as a graph= source, which is \
+             resolved through the kernel where urn:cap:net:* applies. This SPARQL text calls \
+             SERVICE {service}, and this endpoint refuses SERVICE before \
              evaluation: a federated call would be oxigraph's own HTTP request, made outside the \
-             kernel where no urn:cap:net:* is consulted (ledger #1083). No grant changes this. \
-             Federate through the kernel instead: list the remote graph as a graph= source, \
-             which is resolved through the kernel where urn:cap:net:* applies"
+             kernel where no urn:cap:net:* is consulted. No grant changes this"
         ),
     }
 }
@@ -130,8 +130,9 @@ impl fmt::Display for ServiceRefused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "SERVICE <{}> refused: this endpoint makes no network request from SPARQL \
-             (no urn:cap:net:* is consulted there; ledger #1083)",
+            "List the remote graph as a graph= source resolved through the kernel. SERVICE <{}> \
+             refused: this endpoint makes no network request from SPARQL \
+             (no urn:cap:net:* is consulted there)",
             self.0
         )
     }
@@ -179,6 +180,7 @@ mod tests {
                 err.contains("refused") || err.contains("unbound"),
                 "`{query}` must fail without a request, got {err:?}"
             );
+            assert!(!err.contains("ledger #"), "{err}");
             assert!(!err.contains("connect"), "`{query}`: {err}");
         }
         let err = evaluator()
@@ -209,6 +211,7 @@ mod tests {
             "ASK { ?a ?b ?c BIND(EXISTS { SERVICE <http://x/> { ?s ?p ?o } } AS ?e) }",
         ] {
             let err = refused(text);
+            assert!(!err.to_string().contains("ledger #"), "{err}");
             assert!(
                 matches!(&err, Error::InvalidArgument { name, detail }
                     if name == "query" && detail.contains("urn:cap:net:*")),
@@ -234,6 +237,7 @@ mod tests {
         ] {
             let err = check_update(&SparqlParser::new().parse_update(text).unwrap(), "content")
                 .unwrap_err();
+            assert!(!err.to_string().contains("ledger #"), "{err}");
             assert!(
                 matches!(&err, Error::InvalidArgument { name, .. } if name == "content"),
                 "`{text}`: {err:?}"

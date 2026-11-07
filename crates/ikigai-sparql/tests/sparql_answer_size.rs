@@ -91,6 +91,8 @@ fn assert_too_large(outcome: ikigai_core::Result<Vec<u8>>, says: &str) {
         ),
         Err(Error::InvalidArgument { name, detail }) => {
             assert_eq!(name, "query", "{detail}");
+            assert!(detail.starts_with("Add LIMIT"), "{detail}");
+            assert!(!detail.contains("ledger #"), "{detail}");
             assert!(detail.contains(says), "{detail}");
             assert!(detail.contains("refused, not truncated"), "{detail}");
         }
@@ -109,7 +111,7 @@ fn an_answer_past_the_default_row_bound_is_refused_not_sent() {
             &default_kernel(),
             request("select", &[("query", &text), ("as", "text/csv")]),
         ),
-        &format!("the answer exceeds {DEFAULT_MAX_ROWS} rows; add LIMIT, narrow the query"),
+        &format!("The answer exceeds {DEFAULT_MAX_ROWS} rows"),
     );
 }
 
@@ -120,7 +122,7 @@ fn an_answer_past_the_default_byte_bound_is_refused_not_sent() {
     let text = product(3, 44);
     assert_too_large(
         issue(&default_kernel(), request("select", &[("query", &text)])),
-        &format!("the answer exceeds {DEFAULT_MAX_BYTES} bytes"),
+        &format!("The answer exceeds {DEFAULT_MAX_BYTES} bytes"),
     );
     // The same rows as CSV are well under it, and come back whole.
     let body = issue(
@@ -169,7 +171,7 @@ fn a_hosts_row_bound_admits_the_answer_at_it_and_refuses_one_past_it() {
                 &[("query", &product(1, 1001)), ("as", "text/csv")],
             ),
         ),
-        "the answer exceeds 1000 rows",
+        "The answer exceeds 1000 rows",
     );
 }
 
@@ -191,7 +193,7 @@ fn a_byte_bound_admits_the_answer_at_it_and_refuses_one_byte_less() {
             &bounded_kernel(DEFAULT_MAX_ROWS, size - 1),
             request("select", &[("query", &text)]),
         ),
-        &format!("the answer exceeds {} bytes", size - 1),
+        &format!("The answer exceeds {} bytes", size - 1),
     );
 }
 
@@ -210,11 +212,11 @@ fn a_request_can_lower_the_bound_and_cannot_raise_it() {
         )
     };
     assert_eq!(lines(&rows("10", &ten).unwrap()), 11);
-    assert_too_large(rows("9", &ten), "the answer exceeds 9 rows");
+    assert_too_large(rows("9", &ten), "The answer exceeds 9 rows");
     // Asking for more than the space allows gets the space's bound.
     assert_too_large(
         rows("999999999", &product(2, 400)),
-        &format!("the answer exceeds {DEFAULT_MAX_ROWS} rows"),
+        &format!("The answer exceeds {DEFAULT_MAX_ROWS} rows"),
     );
 
     let whole = issue(&kernel, request("select", &[("query", &ten)])).unwrap();
@@ -266,14 +268,14 @@ fn a_graph_answer_counts_triples() {
             &kernel,
             request("construct", &[("query", &text), ("max_rows", "99")]),
         ),
-        "the answer exceeds 99 triples",
+        "The answer exceeds 99 triples",
     );
     assert_too_large(
         issue(
             &kernel,
             request("construct", &[("query", &text), ("max_bytes", "100")]),
         ),
-        "the answer exceeds 100 bytes",
+        "The answer exceeds 100 bytes",
     );
     // DESCRIBE over the always-loaded vocabulary: hundreds of triples.
     assert_too_large(
@@ -287,7 +289,7 @@ fn a_graph_answer_counts_triples() {
                 ],
             ),
         ),
-        "the answer exceeds 10 triples",
+        "The answer exceeds 10 triples",
     );
 }
 
@@ -320,7 +322,7 @@ fn the_shared_store_space_is_bounded_too() {
             &kernel,
             request("select", &[("query", "SELECT * WHERE { ?s ?p ?o }")]),
         ),
-        "the answer exceeds 5 rows",
+        "The answer exceeds 5 rows",
     );
     issue(
         &kernel,
@@ -391,6 +393,8 @@ fn a_bound_given_by_reference_is_refused_not_ignored() {
                 match invoke(index, req) {
                     Err(Error::InvalidArgument { name: got, detail }) => {
                         assert_eq!(got, name, "{detail}");
+                        assert!(detail.starts_with("Give "), "{detail}");
+                        assert!(!detail.contains("ledger #"), "{detail}");
                         assert!(detail.contains("refused rather than ignored"), "{detail}");
                     }
                     other => panic!("{name} as {value:?}: {:?}", other.map(|b| b.len())),
