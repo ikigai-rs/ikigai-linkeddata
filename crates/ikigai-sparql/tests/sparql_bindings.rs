@@ -71,6 +71,9 @@ fn try_query(
     )
     .with_arg("query", ArgRef::Inline(query.as_bytes().to_vec()))
     .with_arg("as", ArgRef::Inline(b"text/csv".to_vec()));
+    if form == "construct" {
+        request = request.with_arg("as", ArgRef::Inline(b"application/n-triples".to_vec()));
+    }
     if form == "ask" {
         request = request.with_arg(
             "as",
@@ -360,4 +363,86 @@ fn json_string(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Reproduces ledger #3269 on both query doors. An outer VALUES is joined with the
+/// UNION's results; it does not supply the input of the branch's Extend (BIND).
+#[test]
+fn construct_union_bind_does_not_read_outer_values() {
+    const BINDINGS: &str = r#"{"holder":{"type":"uri","value":"urn:test:holder"}}"#;
+    const EXPECTED: &str = "<urn:test:holder> <urn:test:p> <urn:test:o> .\n";
+    for (door, kernel, graph) in doors() {
+        let construct = |pattern: &str, subject: &str, bindings: Option<&str>| {
+            let query = format!(
+                "CONSTRUCT {{ {subject} <urn:test:p> <urn:test:o> }} WHERE {{ {pattern} }}"
+            );
+            try_query(
+                &kernel,
+                "construct",
+                graph,
+                &query,
+                bindings.map(|b| ArgRef::Inline(b.as_bytes().to_vec())),
+            )
+            .unwrap_or_else(|e| panic!("{door}: {query}: {e}"))
+        };
+        let branch = "{ BIND(?holder AS ?s) } UNION { FILTER(false) }";
+        // The reported case: accepted bindings, but the template's ?s is unbound.
+        assert_eq!(
+            construct(
+                &format!("VALUES ?holder {{ UNDEF }} {branch}"),
+                "?s",
+                Some(BINDINGS)
+            ),
+            "",
+            "{door}"
+        );
+        // Query-level VALUES (after WHERE) also does not reach into the branch.
+        let query = format!(
+            "CONSTRUCT {{ ?s <urn:test:p> <urn:test:o> }} WHERE {{ {branch} }} \
+             VALUES ?holder {{ UNDEF }}"
+        );
+        assert_eq!(
+            try_query(
+                &kernel,
+                "construct",
+                graph,
+                &query,
+                Some(ArgRef::Inline(BINDINGS.as_bytes().to_vec())),
+            )
+            .unwrap(),
+            "",
+            "{door}"
+        );
+        // The same outcome with standard SPARQL alone: no bindings injection involved.
+        assert_eq!(
+            construct(
+                &format!("VALUES ?holder {{ <urn:test:holder> }} {branch}"),
+                "?s",
+                None
+            ),
+            "",
+            "{door}"
+        );
+        // A value in the branch itself is available to its BIND.
+        assert_eq!(
+            construct(
+                "{ VALUES ?holder { <urn:test:holder> } BIND(?holder AS ?s) } UNION { FILTER(false) }",
+                "?s",
+                None,
+            ),
+            EXPECTED,
+            "{door}"
+        );
+        // The documented workaround keeps the supplied term in the template directly.
+        // No graph matches: OPTIONAL must preserve the row and the bound subject.
+        assert_eq!(
+            construct(
+                "OPTIONAL { GRAPH ?atom { ?holder <urn:test:missing> ?value } }",
+                "?holder",
+                Some(BINDINGS),
+            ),
+            EXPECTED,
+            "{door}"
+        );
+    }
 }
