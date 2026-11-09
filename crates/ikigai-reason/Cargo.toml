@@ -10,27 +10,24 @@ description = "Bounded OWL 2 RL closure and inferred triples as cacheable ikigai
 
 [dependencies]
 ikigai-core.workspace = true
-ikigai-rdf.workspace = true
+ikigai-rdf = { workspace = true, features = ["rdf-12"] }
 oxrdf.workspace = true
-oxrdfio.workspace = true
-reasonable = "0.4.4"
+oxrdfio = { workspace = true, features = ["rdf-12"] }
+reasonable = { version = "0.4.4", features = ["rdf-12"] }
 async-trait = "0.1"
 
 [features]
-# Match the workspace's RDF 1.2 feature-unified hosts. Reasonable's feature
-# makes its rio adapter exhaustive; reasoning here still accepts RDF 1.1 only.
-rdf-12 = ["reasonable/rdf-12", "ikigai-rdf/rdf-12", "oxrdfio/rdf-12"]
+# Compatibility alias: RDF 1.2 adapter support is always enabled so sibling
+# dependencies cannot make reasonable's oxrdf matches non-exhaustive. The
+# reasoner still accepts RDF 1.1 only and rejects triple terms before inference.
+rdf-12 = []
 
 [dev-dependencies]
 futures = "0.3"
 # examples/choosing.rs measures a SPARQL property path beside the reasoner (ledger #2640).
-# Its `rdf-12` matches the oxrdf variant the dev build already turns on below.
+# Match the RDF 1.2 adapter support enabled by the reasoner.
 ikigai-sparql = { path = "../ikigai-sparql", features = ["rdf-12"] }
 ikigai-conformance = "0.14.0"
-# Sibling test builds enable oxrdf/rdf-12; reasonable must see that variant too.
-reasonable = { version = "0.4.4", features = ["rdf-12"] }
-# Standalone crate tests need the parsers' matching arms as well.
-oxrdfio = { workspace = true, features = ["rdf-12"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
