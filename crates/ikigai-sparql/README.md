@@ -532,9 +532,9 @@ answer never grows in memory past its bound. The same 939-byte query is now refu
 127 ms. The refusal is `InvalidArgument` on `query`, the kind the algebra bounds use:
 
 ```text
-invalid argument `query`: the answer exceeds 100000 rows; add LIMIT, narrow the query, or ask
-the host for more. It was refused, not truncated: no part of it was sent (ledger #970). A
-request's `max_rows=` can only lower this bound
+invalid argument `query`: Add LIMIT, narrow the query, or ask the host for more. The answer
+exceeds 100000 rows. It was refused, not truncated: no part of it was sent. A request's
+`max_rows=` can only lower this bound
 ```
 
 (`triples` in place of `rows` for a graph answer; `bytes` and `max_bytes=` for the byte bound.)

@@ -188,9 +188,9 @@ pub fn effective_budget(requested: Option<&str>, ceiling: Duration) -> Result<Du
 /// below the time budget, which is why that one is cached.
 pub fn timeout(budget: Duration, what: &str) -> Error {
     Error::Timeout(format!(
-        "{what} ran past its time budget of {} ms and was stopped (ledger #964). The budget is \
-         set by the host, and a request's `budget=` can only lower it. Narrow the query — fewer \
-         joins, a bound subject, a LIMIT — or ask the host for a larger budget",
+        "Narrow the query — fewer joins, a bound subject, a LIMIT — or ask the host for a larger \
+         budget. {what} ran past its time budget of {} ms and was stopped. The budget is set by \
+         the host, and a request's `budget=` can only lower it",
         budget.as_millis()
     ))
 }
@@ -406,15 +406,15 @@ pub fn effective_answer(
 ///
 /// Refused, not ignored: an ignored bound falls back to the space's own, and a host door that
 /// stamps a smaller bound only when the caller sent none would see one present and stamp
-/// nothing. The caller would have bypassed the door by sending its bound as a reference.
+/// nothing. The caller would have bypassed the door by sending its bound as a reference (ledger #970).
 pub fn inline_bound<'a>(inv: &Invocation<'a>, name: &str) -> Result<Option<&'a str>> {
     let request = inv.request;
     let refuse = |how: &str| Error::InvalidArgument {
         name: name.to_string(),
         detail: format!(
-            "`{name}=` was given {how}: a bound is read only as an inline value, and one given \
-             any other way is refused rather than ignored, because ignoring it would apply this \
-             space's own bound in place of the one a host's door meant to stamp (ledger #970)"
+            "Give `{name}=` as inline UTF-8 text. It was given {how}: a bound given any other way \
+             is refused rather than ignored, because ignoring it would apply this space's own \
+             bound in place of the one a host's door meant to stamp"
         ),
     };
     match request.args.get(name) {
@@ -455,8 +455,8 @@ pub enum Measure {
 /// are uncacheable too. And not on the time budget's [`timeout`]: see there.
 pub const TOO_LARGE_EXPIRY: Duration = Duration::from_secs(300);
 
-/// The sentence every [`too_large`] refusal carries, and [`is_too_large`] recognizes.
-const NOT_TRUNCATED: &str = "It was refused, not truncated: no part of it was sent (ledger #970).";
+/// The sentence every [`too_large`] refusal carries, and [`is_too_large`] recognizes (ledger #970).
+const NOT_TRUNCATED: &str = "It was refused, not truncated: no part of it was sent.";
 
 /// Whether `error` is a [`too_large`] refusal, by the row or the byte bound.
 pub fn is_too_large(error: &Error) -> bool {
@@ -482,7 +482,7 @@ pub fn expire_too_large<T>(inv: &Invocation<'_>, outcome: &Result<T>) {
 ///
 /// let text = too_large(Measure::Rows, 100_000).to_string();
 /// assert!(text.contains(
-///     "the answer exceeds 100000 rows; add LIMIT, narrow the query, or ask the host for more"
+///     "Add LIMIT, narrow the query, or ask the host for more. The answer exceeds 100000 rows"
 /// ));
 /// ```
 pub fn too_large(measure: Measure, bound: u64) -> Error {
@@ -494,8 +494,8 @@ pub fn too_large(measure: Measure, bound: u64) -> Error {
     Error::InvalidArgument {
         name: "query".to_string(),
         detail: format!(
-            "the answer exceeds {bound} {unit}; add LIMIT, narrow the query, or ask the host for \
-             more. {NOT_TRUNCATED} A request's `{arg}=` can only lower this bound"
+            "Add LIMIT, narrow the query, or ask the host for more. The answer exceeds {bound} \
+             {unit}. {NOT_TRUNCATED} A request's `{arg}=` can only lower this bound"
         ),
     }
 }
@@ -620,16 +620,18 @@ impl Cost {
         cost
     }
 
+    // Refuse before the uninterruptible planner runs (ledger #964).
     fn verdict(&self, arg: &str) -> Result<()> {
         if self.widest_join > MAX_JOIN_OPERANDS {
             return Err(Error::InvalidArgument {
                 name: arg.to_string(),
                 detail: format!(
-                    "this SPARQL text joins {} patterns in one group, and this endpoint refuses \
+                    "Split the query, or move a list of values into VALUES. This SPARQL text joins \
+                     {} patterns in one group, and this endpoint refuses \
                      more than {MAX_JOIN_OPERANDS} (MAX_JOIN_OPERANDS) before planning: the \
                      planner's join ordering grows about with the cube of that number and \
-                     cannot be interrupted (ledger #964). A sequence path counts one pattern a \
-                     step. Split the query, or move a list of values into VALUES",
+                     cannot be interrupted. A sequence path counts one pattern a \
+                     step",
                     self.widest_join
                 ),
             });
@@ -638,11 +640,11 @@ impl Cost {
             return Err(Error::InvalidArgument {
                 name: arg.to_string(),
                 detail: format!(
-                    "this SPARQL text has {} algebra operators (patterns, OPTIONAL/UNION/FILTER/\
+                    "Use VALUES and IN (…) for long lists; their constants cost nothing. Split the query \
+                     if needed. This SPARQL text has {} algebra operators (patterns, OPTIONAL/UNION/FILTER/\
                      BIND, path and expression operators), and this endpoint refuses more than \
                      {MAX_ALGEBRA_NODES} (MAX_ALGEBRA_NODES) before planning: the planner is \
-                     quadratic in several of them and cannot be interrupted (ledger #964). \
-                     Constants in VALUES and IN (…) cost nothing; use them for long lists",
+                     quadratic in several of them and cannot be interrupted",
                     self.nodes
                 ),
             });
@@ -911,6 +913,42 @@ mod tests {
 
     fn patterns(n: usize) -> String {
         (0..n).map(|i| format!("?s <urn:p> ?o{i} . ")).collect()
+    }
+
+    #[test]
+    fn refusals_give_actions_without_internal_ledger_numbers() {
+        let errors = [
+            timeout(Duration::from_millis(25), "query"),
+            too_large(Measure::Rows, 10),
+            too_large(Measure::Triples, 10),
+            too_large(Measure::Bytes, 100),
+            Cost {
+                widest_join: MAX_JOIN_OPERANDS + 1,
+                ..Cost::default()
+            }
+            .verdict("query")
+            .unwrap_err(),
+            Cost {
+                nodes: MAX_ALGEBRA_NODES + 1,
+                ..Cost::default()
+            }
+            .verdict("query")
+            .unwrap_err(),
+        ];
+        for error in errors {
+            let text = error.to_string();
+            assert!(!text.contains("ledger #"), "{text}");
+            if let Error::InvalidArgument { detail, .. } = error {
+                assert!(
+                    detail.starts_with("Add LIMIT")
+                        || detail.starts_with("Split the query")
+                        || detail.starts_with("Use VALUES"),
+                    "{detail}"
+                );
+            } else if let Error::Timeout(detail) = error {
+                assert!(detail.starts_with("Narrow the query"), "{detail}");
+            }
+        }
     }
 
     #[test]

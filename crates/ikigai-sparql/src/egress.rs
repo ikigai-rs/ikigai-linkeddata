@@ -71,12 +71,11 @@ pub(crate) fn check_update(update: &Update, arg: &str) -> Result<()> {
                 return Err(Error::InvalidArgument {
                     name: arg.to_string(),
                     detail: format!(
-                        "this SPARQL update has LOAD {source}, and this endpoint refuses LOAD \
-                         before evaluation: the fetch would be oxigraph's own HTTP request, made \
-                         outside the kernel where no urn:cap:net:* is consulted (ledger #1083). \
-                         No grant changes this. Pull the document in through the kernel instead \
-                         (urn:http:get, which urn:cap:net:* gates) and sink an INSERT DATA built \
-                         from it. Nothing was applied"
+                        "Pull the document in through the kernel (urn:http:get, which urn:cap:net:* \
+                         gates) and sink an INSERT DATA built from it. This SPARQL update has \
+                         LOAD {source}, and this endpoint refuses LOAD before evaluation: the \
+                         fetch would be oxigraph's own HTTP request, made outside the kernel \
+                         where no urn:cap:net:* is consulted. No grant changes this. Nothing was applied"
                     ),
                 });
             }
@@ -95,11 +94,11 @@ fn refuse_service(service: &str, arg: &str) -> Error {
     Error::InvalidArgument {
         name: arg.to_string(),
         detail: format!(
-            "this SPARQL text calls SERVICE {service}, and this endpoint refuses SERVICE before \
-             evaluation: a federated call would be oxigraph's own HTTP request, made outside the \
-             kernel where no urn:cap:net:* is consulted (ledger #1083). No grant changes this. \
-             Federate through the kernel instead: list the remote graph as a graph= source, \
-             which is resolved through the kernel where urn:cap:net:* applies"
+            "Federate through the kernel: list the remote graph as a graph= source, which is \
+             resolved through the kernel where urn:cap:net:* applies. This SPARQL text calls \
+             SERVICE {service}, and this endpoint refuses SERVICE before evaluation: a federated \
+             call would be oxigraph's own HTTP request, made outside the kernel where no \
+             urn:cap:net:* is consulted. No grant changes this"
         ),
     }
 }
@@ -130,8 +129,8 @@ impl fmt::Display for ServiceRefused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "SERVICE <{}> refused: this endpoint makes no network request from SPARQL \
-             (no urn:cap:net:* is consulted there; ledger #1083)",
+            "Federate through the kernel using a graph= source. SERVICE <{}> refused: this \
+             endpoint makes no network request from SPARQL (no urn:cap:net:* is consulted there)",
             self.0
         )
     }
@@ -145,6 +144,30 @@ mod tests {
     use oxigraph::sparql::QueryResults;
     use oxigraph::store::Store;
     use spargebra::SparqlParser;
+
+    #[test]
+    fn network_refusals_give_actions_without_internal_ledger_numbers() {
+        let errors = [
+            refuse_service("<http://x/>", "query").to_string(),
+            check_update(
+                &SparqlParser::new()
+                    .parse_update("LOAD <http://x/g>")
+                    .unwrap(),
+                "content",
+            )
+            .unwrap_err()
+            .to_string(),
+            ServiceRefused("http://x/".to_string()).to_string(),
+        ];
+        for text in errors {
+            assert!(!text.contains("ledger #"), "{text}");
+            assert!(
+                text.contains("Federate through the kernel")
+                    || text.contains("Pull the document in through the kernel"),
+                "{text}"
+            );
+        }
+    }
 
     /// Layer 2 on its own: an evaluator from [`evaluator`] given a `SERVICE` that layer 1
     /// never saw fails, naming the refusal, instead of calling anything. In the probe build
