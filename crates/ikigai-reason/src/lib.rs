@@ -27,11 +27,13 @@ pub const SPACE_ID: &str = "urn:iki:space:reason";
 /// Host-configured refusal bounds; neither bound truncates a graph.
 ///
 /// The input bound is checked BEFORE calling `reason()`: that call cannot be
-/// interrupted, and wasm has no worker thread on which to time it out. Bounding
-/// input therefore bounds the work admitted to the reasoner, rather than promising
-/// a wall-clock deadline. The output bound is checked AFTER materialization: it
-/// limits the answer, not peak memory or time inside `reasonable`. Closure can
-/// grow quadratically (or worse for some rule combinations).
+/// interrupted, and wasm has no worker thread on which to time it out. The output
+/// bound is checked AFTER materialization: it limits the answer, not peak memory or
+/// time inside `reasonable`. Neither is a deadline, and at the defaults neither
+/// bounds the work: equality is materialized pairwise, and an 801-triple
+/// `owl:sameAs` chain took 167 s and 9.4 GB in a release build before the output
+/// bound refused it (`tests/closure_expansion.rs`, ledger #3433). A host serving
+/// untrusted graphs sets `max_input_triples` far lower.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub max_input_triples: usize,
