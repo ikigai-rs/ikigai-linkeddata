@@ -41,10 +41,15 @@ regression check and before/after measurement.
 | | `src` | instead of `content`: the IRI of an RDF resource to transrept, resolved through the kernel under the caller's capability (an `http(s)://` URL via `urn:http:get`) |
 | | `as` | target representation (default `text/turtle`) |
 
-The input syntax is sniffed from its opening tokens (`{`/`[` → JSON-LD; a leading
-`<scheme:…>` IRI → Turtle/N-Triples; a leading XML element → RDF/XML; otherwise Turtle),
-so an explicit input format isn't needed for the common cases. A `src=` resource is
-sniffed the same way. Give `content` or `src`, exactly one: both together is refused as
+The input syntax is sniffed from its opening tokens: JSON objects/arrays select JSON-LD,
+XML elements select RDF/XML, and RDF tokens select the Turtle family (Turtle, TriG,
+N-Triples and N-Quads). Braces and brackets can also start TriG graphs and Turtle blank-node
+property lists; the following token distinguishes them from JSON-LD. The Turtle-family
+parsers keep reading their common syntax until they can distinguish triples from quads.
+A `src=` resource uses its declared RDF media type when available, with sniffing as a
+fallback. Its retrieval IRI supplies the document base; an in-document base declaration
+takes precedence. Inline `content=` has no retrieval base, so relative IRIs require an
+in-document base. Give `content` or `src`, exactly one: both together is refused as
 an `InvalidArgument`. A `src=` read is a sub-request of the transreption, so the answer is
 exactly as cacheable as the source and carries its golden threads: cutting the source's
 thread invalidates the transrepted answer too. Turtle and XML both open
@@ -57,7 +62,27 @@ an authority-less scheme (`<urn:…>`, `<mailto:…>`, `<did:…>`) sniffs as Tu
 `text/turtle` (default), `application/n-triples`, `application/n-quads`,
 `application/trig`, `application/rdf+xml`, `application/ld+json`, or `text/html` for a
 human-readable subject/predicate/object table over the parsed triples. Short aliases
-(`ttl`, `nt`, `trig`, `jsonld`, …) are accepted too.
+(`ttl`, `nt`, `trig`, `jsonld`, …) are accepted too; the response carries the canonical
+media type, such as `application/n-triples` for `nt`.
+
+Named graphs survive between TriG, N-Quads and JSON-LD. Turtle, N-Triples and RDF/XML
+refuse a dataset containing named graphs rather than discarding their names. The HTML
+face is a view of subject/predicate/object rows, not a dataset serialization; it does not
+show graph names. JSON-LD refuses RDF 1.2 triple terms; direction-tagged literals are
+supported with `rdf-12` enabled.
+
+Transreption preserves RDF terms, including literal lexical forms, but expands input
+prefixes instead of retaining their declarations. Blank nodes remain blank nodes, with
+deterministic labels; this endpoint does not skolemize them. Identical input produces
+identical output, but isomorphic documents need not produce identical bytes.
+
+Union and diff use Turtle triple sets. Explicit blank-node labels shared by the two
+inputs identify the same node; distinct labels and independently anonymous nodes remain
+distinct, even when their structures are isomorphic. These operations do not perform
+an isomorphism comparison. Use skolemized IRIs for persistent identity across sync deltas.
+
+See the [graph fidelity audit](../../docs/audits/rdf-graph-fidelity.md) for synthetic
+coverage, reproductions and limits.
 
 ## Usage
 
