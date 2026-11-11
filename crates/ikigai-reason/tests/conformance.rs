@@ -8,7 +8,7 @@ use ikigai_reason::{space, space_with_limits, Limits, SPACE_ID};
 #[test]
 fn conforms() {
     let composed = space().bind(Exact::new("urn:test:graph"), FnEndpoint::new("fixture", |_| Ok(Representation::new(ReprType::new("text/turtle"),
-        b"@prefix dcterms: <http://purl.org/dc/terms/> . <urn:example:conformance> dcterms:title \"conformance\" .".to_vec()).cacheable())));
+        b"@prefix dcterms: <http://purl.org/dc/terms/> . <urn:example:conformance> dcterms:title \"conformance\" ; dcterms:hasPart [ dcterms:title \"anonymous\" ] .".to_vec()).cacheable())));
     let mut suite = Suite::new()
         .own("reason-*")
         .self_named_space("reason", space)

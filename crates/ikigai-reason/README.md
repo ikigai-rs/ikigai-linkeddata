@@ -1,6 +1,6 @@
 # ikigai-reason
 
-OWL 2 RL closure as two stateless ikigai resources, using
+OWL 2 RL materialization as two stateless ikigai resources, using
 [`reasonable` 0.4.4](https://github.com/gtfierro/reasonable) (BSD-3-Clause)
 through its in-memory API. No files, network clients, stores, or inference rules
 are implemented here. Sources are read through the kernel under the caller's
@@ -8,7 +8,7 @@ capability; HTTP(S) graph IRIs are fetched through `urn:http:get`.
 
 | Resource | Answer |
 | --- | --- |
-| `urn:reason:closure` | Input RDF merge plus every triple materialized by reasonable |
+| `urn:reason:closure` | Skolemized input RDF merge plus every triple materialized by reasonable |
 | `urn:reason:inferred` | The same closure minus the input triples |
 
 Both take these ArgSpecs:
@@ -24,8 +24,15 @@ Mount `ikigai_reason::space()` and `ikigai_rdf::space()` together; the latter
 provides the non-Turtle faces through `urn:rdf:transrept`. Turtle output uses
 the shared `ikigai-rdf` serializer backed by Oxigraph. Input media types must name
 an RDF syntax supported by `oxrdfio`. Relative IRIs resolve against the source IRI. Dataset inputs are
-flattened into one graph. Blank nodes are scoped to their source document;
-repeated source IRIs are read once. Output order and blank labels are deterministic
+flattened into one graph. Blank nodes are skolemized before reasoning to
+`urn:ikigai:reason:blank:<sha256>:b<N>` IRIs. The digest covers length-delimited
+source IRI, declared media type (without parameters), and document bytes; the label
+is assigned in parser order within that document. Identical documents at different
+source IRIs have separate nodes. Repeated source IRIs are read once. The names are
+deterministic for identical sources, media types and bytes, including across separate
+closure and inferred requests. They are not persistent identity across document edits
+or changes of syntax. Input preservation and subtraction operate on this skolemized
+merge; no blank nodes appear on any output face. Output order is deterministic
 for the same inputs. Turtle retains the input namespace prefixes (resolved against
 its base); when sources conflict on a prefix name, the first source wins and
 other terms serialize losslessly as full IRIs. Within a document the final
@@ -37,10 +44,21 @@ RDF triples but do not retain those comments.
 For a shorter answer in runbook pages, request
 `urn:reason:inferred graph=urn:my:data,urn:my:vocabulary omit-thing=true`.
 This removes only new `rdf:type owl:Thing` triples, after reasoning and budget
-checks, on every output face. Full output remains the default so existing callers
-still receive the documented complete closure or exact input subtraction.
-The profile delegates to reasonable's OWL 2 RL rules; this
-module does not provide a consistency verdict or an RDFS-only mode.
+checks, on every output face. Full output remains the default so callers
+still receive the entire materialized closure or exact skolemized input subtraction.
+The profile delegates to reasonable's OWL 2 RL rules. This is not a complete
+OWL 2 RL/RDF implementation: a small [correctness audit](../../docs/audits/reason-correctness.md)
+reproduces missing equality/schema conclusions and an unsound inverse-functional
+property inference in reasonable 0.4.4. Those rules are not repaired by this wrapper.
+
+Detected OWL RL contradictions refuse with `InvalidArgument` on `graph`, naming
+the violated rule IDs, before output filtering or serialization. The engine detects
+`cax-dw`, `prp-irp`, `prp-asyp`, `cls-nothing2`, and `prp-pdw` in the audit fixtures.
+It misses `eq-diff1` and `cls-com`: those inconsistent graphs can still produce
+successful answers. A successful answer is therefore **not a consistency verdict**.
+The engine's separate RDFS datatype diagnostics are not used for refusal: 0.4.4
+reports false datatype-range clashes for ordinary object-property ranges. There is
+no RDFS-only mode.
 
 ```rust
 use ikigai_core::{Fallback, Kernel};
@@ -113,7 +131,10 @@ before reaching the engine's unsupported RDF-star paths.
 CI also tests an isolated host crate with RDF 1.2 enabled through sibling
 `ikigai-rdf` and no reasoner features, checking compilation and typed refusal.
 
-Small fixtures cover subclass chains, subproperties, domain/range, inverse,
+The [audit report](../../docs/audits/reason-correctness.md) records per-rule results
+and commands for the explicitly ignored, failing library reproductions. Green CI
+does not mean those rules pass. Small fixtures cover subclass chains, subproperties,
+domain/range, inverse,
 equivalent classes/sameAs, and SKOS transitivity. Other tests cover exact inferred
 set subtraction, RDF merging, selective thread invalidation, deterministic
 recomputation, both bounds, and typed failures. `ikigai-conformance` checks both
@@ -130,8 +151,8 @@ A host can answer "what is above this class?" three ways:
    consult. It covers `subClassOf` only and is fixed when the kernel is built.
 2. **A SPARQL property path**: `urn:sparql:construct` or `select` with
    `rdfs:subClassOf+` (or `*`), one query for each question.
-3. **A reasoner**: `urn:reason:closure` or `urn:reason:inferred`, the full OWL 2 RL
-   closure.
+3. **A reasoner**: `urn:reason:closure` or `urn:reason:inferred`, the engine's OWL 2 RL
+   materialization, subject to the correctness limitations above.
 
 Approaches 2 and 3 are cacheable kernel resources. An edit to their input cuts its golden
 thread and recomputes only what depends on it.
