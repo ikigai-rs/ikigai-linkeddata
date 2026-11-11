@@ -95,6 +95,11 @@ terms that ikigai-vocab does not already know, `ikigai_feed::RELATIONS` among th
 [ikigai Book's](https://github.com/ikigai-rs/ikigai-tutorial) RSS example writes. `tests/river.rs`
 runs its river query, verbatim, over the form lifted from all three syntaxes.
 
+Registered link relations accept both their short name (`alternate`, `self`, `enclosure`,
+`via`, etc.) and the equivalent `http://www.iana.org/assignments/relation/` IRI, as
+RFC 4287 section 4.2.7.2 requires. This equivalence also applies when choosing a channel's
+self link, an item's alternate link, and an entry's source feed.
+
 Nothing in the form needs a feed-only field. A channel is "the document the items came from",
 and it is named by `base` when one is given, so a site with no feed can write the same form.
 
@@ -146,12 +151,18 @@ U+0000 (no XML text can contain U+0000):
 
 ### Dates
 
-Every date is an `xsd:dateTime` in UTC (`2026-10-07T17:00:00Z`). feed-rs parses RFC 3339
-(Atom, RSS 1.0's W3CDTF) and RFC 5322 (RSS 2.0), including the zone names RSS writers use
-(`GMT`, `UT`, `EST`/`EDT`, `CST`/`CDT`, `MST`/`MDT`, `PST`/`PDT`). The written offset is
-normalized away: the instant is kept, the zone it was written in is not (on purpose; see
-"Date offsets" below). Published and updated
-dates stay separate when the source gives both. feed-rs copies an RSS `pubDate` into "updated"
+Every date is an `xsd:dateTime` in UTC (`2026-10-07T17:00:00Z`). The lift supplies
+feed-rs with a timestamp parser that accepts complete RFC 3339 instants (Atom, RSS 1.0's
+W3CDTF, and RSS 2.0) and RFC 5322 dates (RSS 2.0), including two-digit years and the zone
+names RSS writers use (`GMT`, `UT`, `UTC`, `EST`/`EDT`, `CST`/`CDT`, `MST`/`MDT`,
+`PST`/`PDT`, and `Z`). Atom requires uppercase `T` and `Z`, as RFC 4287 section 3.3 specifies.
+Invalid calendar and clock fields are omitted, never repaired: `24:30` does not become
+`00:30`, and a date without a time does not become midnight. RSS weekday mismatches are
+still tolerated. Obsolete military zones follow the unknown-offset (`-0000`) policy in
+[RFC 5322 section 4.3](https://www.rfc-editor.org/rfc/rfc5322#section-4.3),
+which supersedes RFC 822's conflicting military-offset definitions. As with all other dates,
+the form retains the instant and drops the written zone information (on purpose; see
+"Date offsets" below). Published and updated dates stay separate when the source gives both. feed-rs copies an RSS `pubDate` into "updated"
 when nothing updated the item, so `dcterms:modified` is written only when it differs from
 `dcterms:issued`. A date that does not parse is dropped.
 
@@ -418,9 +429,9 @@ The written offset stays normalized away, and `dc:date`, `dcterms:issued` and
   Atom lifts to the same triples. UTC makes the same instant the same term everywhere.
 - **Digest IRIs hang on it.** An item with no IRI of its own is named by digest over its date's
   lexical form. Keeping offsets would rename every such item that is not written in UTC.
-- **Recovering it means reparsing.** feed-rs's model holds `DateTime<Utc>`. Getting the offset
-  back means either an upstream API change, or the pre-scan reparsing every date, which would
-  reimplement feed-rs's lenient RFC 5322 parsing.
+- **Recovering it needs more data.** feed-rs's model and timestamp-parser callback hold
+  `DateTime<Utc>`. Keeping the original lexical date alongside the parsed instant would
+  require an upstream API change or an additional pre-scan field.
 
 The form does not change, so there is nothing to note for the next release.
 
@@ -435,6 +446,11 @@ Still lost, and worth having back later:
   above, once published terms are chosen for them.
 - Extension namespaces outside feed-rs's model. The raw feed stays addressable on its
   golden thread, and the form is declared lossy.
+
+## Correctness audit
+
+[The synthetic-feed audit](../../docs/audits/feed-correctness.md) records reproduced defects,
+regression tests, checked behavior, and the projection's remaining losses.
 
 ## wasm
 
