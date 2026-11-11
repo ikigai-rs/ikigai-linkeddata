@@ -16,6 +16,7 @@
 //! [`mapped_space`] answers `urn:iki:feed:mapped:{feed}`, the form with that mapping applied.
 #![forbid(unsafe_code)]
 
+mod dates;
 mod mapped;
 mod scan;
 
@@ -199,7 +200,9 @@ fn optional<'a>(inv: &'a Invocation<'_>, name: &str) -> Result<Option<&'a str>> 
 /// a feed, or nests deeper than [`MAX_FEED_DEPTH`], is [`Error::InvalidArgument`] on `content`.
 pub fn lift(bytes: &[u8], base: Option<&str>) -> Result<Vec<Triple>> {
     let scan = scan::scan(bytes)?;
+    let root = scan.root;
     let parser = feed_rs::parser::Builder::new()
+        .timestamp_parser(move |value| dates::parse(value, root))
         .base_uri(base)
         // An empty id is "the source gave none": the IRI rule below decides, not a generator.
         .id_generator(|_, _, _| String::new())
@@ -293,7 +296,7 @@ fn channel_iri(feed: &Feed, base: Option<&str>, root: Root, about: Option<&str>)
         .or_else(|| {
             feed.links
                 .iter()
-                .find(|l| l.rel.as_deref() == Some("self"))
+                .find(|l| relation(l.rel.as_deref()) == Some("self"))
                 .and_then(|l| absolute(&l.href))
         })
         .or_else(|| (root == Root::Atom).then(|| absolute(&feed.id)).flatten())
@@ -358,11 +361,18 @@ fn kept(entries: &[Entry], named: &[NamedNode]) -> Vec<usize> {
     kept
 }
 
+/// RFC 4287 section 4.2.7.2 makes a registered name and its IANA IRI equivalent.
+fn relation(rel: Option<&str>) -> Option<&str> {
+    rel.map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(|r| r.strip_prefix(vocab::IANA).unwrap_or(r))
+}
+
 /// The first link with no `rel` or `rel="alternate"`, and no other role (comments).
 fn alternate(links: &[Link]) -> Option<&Link> {
-    links
-        .iter()
-        .find(|l| l.target.is_none() && matches!(l.rel.as_deref(), None | Some("alternate")))
+    links.iter().find(|l| {
+        l.target.is_none() && matches!(relation(l.rel.as_deref()), None | Some("alternate"))
+    })
 }
 
 fn text(t: &Option<Text>) -> Option<&str> {
@@ -416,7 +426,7 @@ impl Graph {
             self.string(channel, vocab::DC, "identifier", Some(&feed.id));
         }
         self.string(channel, vocab::DC, "rights", text(&feed.rights));
-        self.people(channel, &feed.authors);
+        self.people(channel, &feed.authors, feed.feed_type != FeedType::Atom);
         self.dates(channel, feed.published, feed.updated);
         self.categories(channel, &feed.categories);
         self.subjects(channel, subjects);
@@ -454,7 +464,7 @@ impl Graph {
         if lang.as_deref() != language {
             self.string(item, vocab::DC, "language", lang.as_deref());
         }
-        self.people(item, &entry.authors);
+        self.people(item, &entry.authors, root != Root::Atom);
         self.dates(item, entry.published, entry.updated);
         self.categories(item, &entry.categories);
         self.subjects(item, &seen.subjects);
@@ -492,7 +502,7 @@ impl Graph {
             let Some(href) = absolute(&link.href) else {
                 continue;
             };
-            let rel = link.rel.as_deref().map(str::trim).filter(|r| !r.is_empty());
+            let rel = relation(link.rel.as_deref());
             let media = link.media_type.as_deref();
             match (&link.target, rel) {
                 (None, Some("enclosure")) => {
@@ -533,17 +543,23 @@ impl Graph {
         self.categories(s, &categories);
     }
 
-    fn people(&mut self, s: &NamedNode, people: &[Person]) {
+    fn people(&mut self, s: &NamedNode, people: &[Person], rss: bool) {
         for person in people {
-            // RSS 2.0 writes `email (Name)`; feed-rs keeps the parentheses on the name.
             let name = person
                 .name
                 .as_deref()
-                .map(|n| {
-                    n.trim()
-                        .trim_start_matches('(')
-                        .trim_end_matches(')')
-                        .trim()
+                .map(str::trim)
+                .map(|name| {
+                    // Only an RSS email contact uses parentheses as name delimiters.
+                    // Atom's name is text, and parentheses inside a name are meaningful.
+                    if rss && person.email.is_some() {
+                        name.strip_prefix('(')
+                            .and_then(|n| n.strip_suffix(')'))
+                            .unwrap_or(name)
+                            .trim()
+                    } else {
+                        name
+                    }
                 })
                 .filter(|n| !n.is_empty())
                 .or(person.email.as_deref().map(str::trim));

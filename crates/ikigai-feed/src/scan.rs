@@ -200,7 +200,7 @@ pub fn scan(bytes: &[u8]) -> Result<Scan> {
                             let href = attribute(&reader, &element, None, "href");
                             if let Some(seen) = scan.entries.last_mut() {
                                 let source = &mut seen.source;
-                                match rel.as_deref().map(str::trim) {
+                                match crate::relation(rel.as_deref()) {
                                     Some("self") if source.this.is_none() => source.this = href,
                                     None | Some("alternate") if source.alternate.is_none() => {
                                         source.alternate = href
