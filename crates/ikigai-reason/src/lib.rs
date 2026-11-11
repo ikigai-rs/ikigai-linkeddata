@@ -1,8 +1,10 @@
 //! Bounded OWL 2 RL materialization through `reasonable`'s in-memory API.
 //!
-//! `urn:reason:closure` returns the RDF merge of `graph=` sources plus entailments;
+//! `urn:reason:closure` returns the skolemized RDF merge of `graph=` sources plus entailments;
 //! `urn:reason:inferred` returns that closure minus the input. Both are cacheable
 //! and resolve sources through the kernel, inheriting their golden threads.
+//! Engine-reported OWL contradictions are refused; successful answers are not
+//! consistency verdicts. See the crate README for known engine rule defects.
 //! Mount [`ikigai_rdf::space`] beside this space for non-Turtle output faces.
 #![forbid(unsafe_code)]
 
@@ -12,9 +14,10 @@ use ikigai_core::{
     Invocation, Iri, ReprType, Representation, Request, Result, Verb,
 };
 use ikigai_rdf::{canonical_triples, serialize_turtle, BlankNodeLabels};
-use oxrdf::Triple;
+use oxrdf::{NamedNode, NamedOrBlankNode, Term, Triple};
 use oxrdfio::{RdfFormat, RdfParser};
-use reasonable::reasoner::Reasoner;
+use reasonable::reasoner::{DiagnosticSeverity, Reasoner};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 
 /// Default maximum number of parsed input triples (duplicates count).
@@ -133,7 +136,6 @@ impl Endpoint for ReasonEndpoint {
         let mut count = 0;
         let mut prefixes = BTreeMap::new();
         let mut sources = Vec::new();
-        let mut labels = BlankNodeLabels::new();
         // Repeating a graph IRI names the same graph, not a fresh blank-node scope.
         let mut seen = HashSet::new();
         for uri in uris {
@@ -165,10 +167,9 @@ impl Endpoint for ReasonEndpoint {
             }
             sources.push(uri);
             count += triples.len();
-            labels.new_document();
-            input.extend(triples.into_iter().map(|triple| labels.triple(triple)));
+            input.extend(skolemize(uri, media, &source.bytes, triples));
         }
-        let triples = materialize(input, &labels, self.inferred, omit_thing, self.limits)?;
+        let triples = materialize(input, self.inferred, omit_thing, self.limits)?;
         // Comments identify the merged sources without adding provenance triples
         // to the closure. IRIs were validated before resolution.
         let mut bytes = format!(
@@ -205,7 +206,7 @@ impl Endpoint for ReasonEndpoint {
             .summary("Bounded OWL 2 RL materialization of kernel-resolved RDF graphs; closure or input-subtracted entailments")
             .verb(Verb::Source).verb(Verb::Meta)
             .input(ArgSpec::new("graph").class(XSD_STRING)
-                .summary("one or more graph IRIs, comma- or whitespace-separated; RDF merge across documents"))
+                .summary("one or more graph IRIs, comma- or whitespace-separated; skolemized RDF merge across documents"))
             .input(ArgSpec::new("profile").class(XSD_STRING).optional()
                 .one_of(["owl-rl"]).default_value("owl-rl"))
             .input(ArgSpec::new("omit-thing").class(XSD_STRING).optional()
@@ -297,9 +298,42 @@ fn parse_source(
     parse()
 }
 
+/// Name document-local blank nodes before reasoning, so closure and inferred
+/// subtraction use the same identity. Hash length-delimited source, syntax and
+/// content; then use deterministic parser-order labels within that document.
+/// Content scoping prevents a changed document's unrelated first blank node from
+/// acquiring the old node's name. This is not persistent identity across edits.
+fn skolemize(uri: &str, media: &str, bytes: &[u8], triples: Vec<Triple>) -> Vec<Triple> {
+    let mut digest = Sha256::new();
+    for part in [uri.as_bytes(), media.as_bytes(), bytes] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part);
+    }
+    let scope = format!("urn:ikigai:reason:blank:{:x}:", digest.finalize());
+    let mut labels = BlankNodeLabels::new();
+    let name =
+        |node: oxrdf::BlankNode| NamedNode::new_unchecked(format!("{scope}{}", node.as_str()));
+    triples
+        .into_iter()
+        .map(|triple| {
+            let triple = labels.triple(triple);
+            Triple::new(
+                match triple.subject {
+                    NamedOrBlankNode::BlankNode(node) => name(node).into(),
+                    other => other,
+                },
+                triple.predicate,
+                match triple.object {
+                    Term::BlankNode(node) => name(node).into(),
+                    other => other,
+                },
+            )
+        })
+        .collect()
+}
+
 fn materialize(
     input: HashSet<Triple>,
-    labels: &BlankNodeLabels,
     inferred: bool,
     omit_thing: bool,
     limits: Limits,
@@ -309,6 +343,32 @@ fn materialize(
     let seed = canonical_triples(input.iter().cloned(), |_| true);
     reasoner.load_triples(seed);
     reasoner.reason();
+    // Never turn an OWL RL contradiction reported by the engine into a
+    // successful partial graph. Its separate RDFS datatype range diagnostics
+    // falsely reject ordinary IRI-valued object-property ranges in 0.4.4;
+    // see the executable reproduction in tests/owl_rl_audit.rs.
+    // Sort and deduplicate rule IDs so the refusal is deterministic and does not
+    // expose the engine's internal term numbering or diagnostic iteration order.
+    let mut violations: Vec<_> = reasoner
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.severity() == &DiagnosticSeverity::Error
+                && diagnostic.code().starts_with("OWLRL.")
+        })
+        .map(|diagnostic| diagnostic.rule())
+        .collect();
+    violations.sort_unstable();
+    violations.dedup();
+    if !violations.is_empty() {
+        return Err(invalid(
+            "graph",
+            format!(
+                "Correct the inconsistent graph before reasoning; OWL RL rules violated: {}.",
+                violations.join(", ")
+            ),
+        ));
+    }
     let mut closure = input.clone();
     for triple in reasoner.view_output() {
         closure.insert(triple.clone());
@@ -331,6 +391,6 @@ fn materialize(
                         != oxrdf::NamedNodeRef::new_unchecked("http://www.w3.org/2002/07/owl#Thing")
                             .into()
             }),
-        |node| labels.is_issued(node),
+        |_| false,
     ))
 }

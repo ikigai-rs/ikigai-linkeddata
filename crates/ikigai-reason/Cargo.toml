@@ -15,6 +15,8 @@ oxrdf.workspace = true
 oxrdfio = { workspace = true, features = ["rdf-12"] }
 reasonable = { version = "0.4.4", features = ["rdf-12"] }
 async-trait = "0.1"
+# Source/content-scoped deterministic names for input blank nodes.
+sha2 = "0.10"
 
 [features]
 # Compatibility alias: RDF 1.2 adapter support is always enabled so sibling

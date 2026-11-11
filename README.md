@@ -19,7 +19,7 @@ to render the constructed graph as an HTML table.
 | [`ikigai-rdf`](https://crates.io/crates/ikigai-rdf) | RDF **transreption** — `urn:rdf:transrept` re-serializes an RDF graph between syntaxes (Turtle, N-Triples, N-Quads, TriG, RDF/XML, JSON-LD) or renders it as an HTML table. Input syntax is sniffed. |
 | [`ikigai-feed`](crates/ikigai-feed) | **Feed normalization**: `urn:iki:feed:graph` lifts RSS 2.0, RSS 1.0 and Atom (parsed by feed-rs) into one skolemized RDF form in RSS 1.0's vocabulary with Dublin Core. Items are named within their feed (an `atom:id` or guid is a property, never the name), dates are `xsd:dateTime`, and categories are nodes. The same lift is a (lossy) transreptor from the feed media types. Per-source mappings are data: one SPARQL CONSTRUCT file per host at `urn:iki:feed:mapping:{source}`, applied at `urn:iki:feed:mapped:{feed}`. |
 | [`ikigai-html`](crates/ikigai-html) | **HTML structure**: `urn:iki:html:graph` lifts HTML (parsed by html5ever's tree builder) into skolemized structural triples (element, attribute, child order, text), from one document or from every HTML literal under a predicate in a graph, each tree rooted at its subject. Mints a small vocabulary, `https://ikigai-rs.dev/ns/html#`. |
-| [`ikigai-reason`](crates/ikigai-reason) | **OWL 2 RL reasoning** through reasonable 0.4.4 — `urn:reason:closure` returns input plus entailments; `urn:reason:inferred` returns only new triples. Bounded, cacheable, and invalidated through input graphs' golden threads. |
+| [`ikigai-reason`](crates/ikigai-reason) | **OWL 2 RL materialization** through reasonable 0.4.4 — `urn:reason:closure` returns input plus entailments; `urn:reason:inferred` returns only new triples. Bounded, cacheable, and invalidated through input graphs' golden threads. |
 | [`ikigai-sniff`](https://crates.io/crates/ikigai-sniff) | **Content-type sniffing and dispatch** — `urn:sniff` classifies opaque (`application/octet-stream`) bytes into a concrete media type by cheap prefix heuristics; `urn:transrept:auto` sniffs piped bytes and dispatches to the matching transreptor chain, so a caller can transrept without knowing the input type. |
 | [`ikigai-sparql`](https://crates.io/crates/ikigai-sparql) | **SPARQL** over resolvable graphs — `urn:sparql:{select,ask,construct,describe}` resolve `graph=` sources through the kernel (cacheable, golden-thread-invalidated), run `query=`, and serialize the results. Shared-store constructors also accept a caller-owned endpoint prefix and require `urn:cap:sparql:query` for reads. Over a host's shared live store, `urn:sparql:update` adds the one **writing** verb: a transactional SPARQL 1.1 UPDATE, capability-gated on `urn:cap:sparql:update`. |
 
@@ -48,7 +48,11 @@ Mount `ikigai_reason::space()` beside `ikigai_rdf::space()` and the host's graph
 sources. Resolve `urn:reason:closure graph=urn:my:data,urn:my:vocabulary` to get
 input plus entailments, or `urn:reason:inferred` with the same arguments for
 only new triples. `profile=owl-rl` is the default. Turtle is the default face;
-the other RDF faces and HTML reuse RDF transreption. Nothing changes the input.
+the other RDF faces and HTML reuse RDF transreption. Blank nodes receive deterministic,
+source/content-scoped skolem IRIs before reasoning; input sources are not modified.
+Detected OWL contradictions refuse with typed errors. The engine has known missing
+and unsound inferences and misses some contradictions; see the
+[correctness audit](docs/audits/reason-correctness.md). An answer is not a consistency verdict.
 
 Reasoning admits at most 1,000 input triples and returns at most 100,000 closure
 triples by default; hosts configure both with `space_with_limits`. Both limits
