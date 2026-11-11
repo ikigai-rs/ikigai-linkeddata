@@ -112,7 +112,9 @@ source urn:sparql:select graph=urn:file:river.nt \
 It is a JSON object of variable name (no `?`) → value. A bare JSON string is a plain literal,
 a number is `xsd:integer` or `xsd:double`, `true`/`false` is `xsd:boolean`, and the SPARQL
 results term shape names anything else: `{"type":"uri","value":"urn:…"}` for an IRI, or
-`{"type":"literal","value":"…"}` with `datatype` or `xml:lang`. `null`, arrays, nested objects
+`{"type":"literal","value":"…"}` with `datatype` or `xml:lang`. A directional language-tagged literal also carries
+`"its:dir":"ltr"` or `"its:dir":"rtl"`; the direction is preserved, and a direction without a
+language tag or with any other value is refused. `null`, arrays, nested objects
 and blank nodes are refused with the reason, and so is an IRI that is not one (it has no
 escape for `>`, so it is never "closed early").
 

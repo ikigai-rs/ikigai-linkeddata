@@ -21,7 +21,7 @@
 //! can never silently not be. [`refusal`] turns oxigraph's error into one naming `bindings`.
 
 use ikigai_core::{Error, Invocation, Result};
-use oxigraph::model::{Literal, NamedNode, Term, Variable};
+use oxigraph::model::{BaseDirection, Literal, NamedNode, Term, Variable};
 
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
@@ -64,6 +64,7 @@ pub(crate) fn refuse(inv: &Invocation<'_>, iri: &str) -> Result<()> {
 /// | `{"type":"uri","value":"urn:…"}` | an IRI |
 /// | `{"type":"literal","value":"…","datatype":"…"}` | a typed literal |
 /// | `{"type":"literal","value":"…","xml:lang":"en"}` | a language-tagged literal |
+/// | `{"type":"literal","value":"…","xml:lang":"en","its:dir":"ltr"}` | a directional literal |
 ///
 /// Everything else is refused with the reason, never coerced: `null` (an unbound variable is
 /// not a binding), an array or nested object (no term means that), and a blank node (scoped to
@@ -132,21 +133,50 @@ fn object_term(name: &str, object: serde_json::Map<String, serde_json::Value>) -
         .ok_or_else(|| bad(format!("`{name}` is a `{kind}` term with no `value`")))?;
     match kind.as_str() {
         "uri" | "iri" => Ok(named_node(name, &lexical)?.into()),
-        "literal" | "typed-literal" => match (
-            string("xml:lang").or_else(|| string("lang")),
-            string("datatype"),
-        ) {
-            (Some(_), Some(_)) => Err(bad(format!(
-                "`{name}` carries both `xml:lang` and `datatype`; a literal has one or the other"
-            ))),
-            (Some(tag), None) => Literal::new_language_tagged_literal(lexical, &tag)
-                .map(Into::into)
-                .map_err(|e| bad(format!("`{name}`: `{tag}` is not a language tag: {e}"))),
-            (None, Some(dt)) => {
-                Ok(Literal::new_typed_literal(lexical, named_node(name, &dt)?).into())
+        "literal" | "typed-literal" => {
+            let direction = match object.get("its:dir") {
+                None => None,
+                Some(serde_json::Value::String(value)) if value == "ltr" => {
+                    Some(BaseDirection::Ltr)
+                }
+                Some(serde_json::Value::String(value)) if value == "rtl" => {
+                    Some(BaseDirection::Rtl)
+                }
+                Some(_) => {
+                    return Err(bad(format!(
+                        "`{name}` has an invalid `its:dir`; use `ltr` or `rtl` with `xml:lang`"
+                    )))
+                }
+            };
+            if direction.is_some() && string("xml:lang").or_else(|| string("lang")).is_none() {
+                return Err(bad(format!(
+                    "`{name}` carries `its:dir` without a language tag; supply `xml:lang`"
+                )));
             }
-            (None, None) => Ok(Literal::new_simple_literal(lexical).into()),
-        },
+            match (
+                string("xml:lang").or_else(|| string("lang")),
+                string("datatype"),
+            ) {
+                (Some(_), Some(_)) => Err(bad(format!(
+                    "`{name}` carries both `xml:lang` and `datatype`; \
+                     a literal has one or the other"
+                ))),
+                (Some(tag), None) => {
+                    let literal = if let Some(direction) = direction {
+                        Literal::new_directional_language_tagged_literal(lexical, &tag, direction)
+                    } else {
+                        Literal::new_language_tagged_literal(lexical, &tag)
+                    };
+                    literal
+                        .map(Into::into)
+                        .map_err(|e| bad(format!("`{name}`: `{tag}` is not a language tag: {e}")))
+                }
+                (None, Some(dt)) => {
+                    Ok(Literal::new_typed_literal(lexical, named_node(name, &dt)?).into())
+                }
+                (None, None) => Ok(Literal::new_simple_literal(lexical).into()),
+            }
+        }
         "bnode" => Err(bad(format!(
             "`{name}` is a blank node, which is scoped to the document that minted it and so \
              names nothing a query can match. Skolemize it and bind the IRI"
@@ -200,6 +230,25 @@ fn bad(detail: String) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_directions_are_refused_instead_of_dropped() {
+        for literal in [
+            serde_json::json!({"type":"literal", "value":"chat", "xml:lang":"fr", "its:dir":"up"}),
+            serde_json::json!({"type":"literal", "value":"chat", "xml:lang":"fr", "its:dir":null}),
+            serde_json::json!({"type":"literal", "value":"chat", "its:dir":"rtl"}),
+            serde_json::json!({"type":"literal", "value":"chat", "datatype":XSD_INTEGER, "its:dir":"rtl"}),
+        ] {
+            let input = serde_json::json!({"label": literal}).to_string();
+            match parse(&input) {
+                Err(Error::InvalidArgument { name, detail }) => {
+                    assert_eq!(name, "bindings");
+                    assert!(detail.contains("its:dir"), "{detail}");
+                }
+                other => panic!("direction must be refused: {input}: {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn each_json_shape_is_its_term() {
