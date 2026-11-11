@@ -215,14 +215,19 @@ fn identical_input_produces_byte_identical_turtle() {
     let feed = atom(
         r#"<entry><title>Missing id</title><content type="html">&lt;b&gt;Body&lt;/b&gt;</content><category term="b"/><category term="a"/></entry>"#,
     );
-    let kernel = Kernel::new(Arc::new(ikigai_feed::space()));
     let request = Request::new(Verb::Source, Iri::parse("urn:iki:feed:graph").unwrap())
         .with_arg("content", ArgRef::Inline(feed.into_bytes()))
         .with_arg("base", ArgRef::Inline(BASE.as_bytes().to_vec()));
-    let first = block_on(kernel.issue(request.clone(), &Capability::root())).unwrap();
+    let turtle = || {
+        // A fresh kernel forces serialization instead of serving the cached answer.
+        let kernel = Kernel::new(Arc::new(ikigai_feed::space()));
+        block_on(kernel.issue(request.clone(), &Capability::root()))
+            .unwrap()
+            .bytes
+    };
+    let first = turtle();
     for _ in 0..8 {
-        let next = block_on(kernel.issue(request.clone(), &Capability::root())).unwrap();
-        assert_eq!(first.bytes, next.bytes);
+        assert_eq!(first, turtle());
     }
 }
 

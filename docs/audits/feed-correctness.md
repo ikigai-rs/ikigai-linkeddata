@@ -38,7 +38,7 @@ not a claim of complete RSS or Atom conformance.
 | Authors, contributors, email and URI | `person_projection_uses_author_name_else_email`: name else email is the projected creator; person URI and contributors are not projected |
 | Categories, scheme and term, enclosure length/type, multiple link relations, RSS 1.0 subjects | Existing `tests/lift.rs`; relation-IRI regression in `tests/audit.rs` |
 | RSS 0.91/0.92/2.0 and RSS 1.0 | Version loop in `tests/audit.rs`; existing RSS 1.0 fixtures and river tests |
-| Determinism | `identical_input_produces_byte_identical_turtle`: repeated endpoint calls including a missing-id entry and multiple categories; existing duplicate-version test |
+| Determinism | `identical_input_produces_byte_identical_turtle`: repeated endpoint calls through fresh kernels including a missing-id entry and multiple categories; existing duplicate-version test |
 | External relative content | `relative_external_content_is_a_documented_loss`: relative Atom content src is still omitted, as the README describes |
 
 The form is a lossy projection, not an Atom validator. Feed/source author inheritance,
