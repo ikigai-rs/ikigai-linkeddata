@@ -1,0 +1,18 @@
+[package]
+name = "reason-feature-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+ikigai-reason = { path = "../.." }
+# Also check that a default-feature SPARQL sibling compiles beside the reasoner.
+ikigai-sparql = { path = "../../../ikigai-sparql" }
+# A sibling enables RDF 1.2 without enabling ikigai-reason/rdf-12.
+ikigai-rdf = { path = "../../../ikigai-rdf", features = ["rdf-12"] }
+
+[dev-dependencies]
+ikigai-core = "0.3.0"
+futures = "0.3"

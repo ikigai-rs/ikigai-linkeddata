@@ -123,6 +123,46 @@ query does not mention is refused, not ignored**, so a filter you thought applie
 A `bindings` that is present but not inline UTF-8 is refused too, never read as "no bindings".
 `urn:sparql:update` refuses a `bindings` argument: oxigraph has no binding door for an update.
 
+### CONSTRUCT with a BIND inside UNION
+
+`bindings=` supplies query evaluation bindings; it does not replace every occurrence of a
+variable with a constant. A UNION branch evaluates its own group before its results are
+joined with an outer `VALUES`. For example, this returns an empty graph with
+`bindings='{"holder":{"type":"uri","value":"urn:test:holder"}}'`:
+
+```sparql
+CONSTRUCT { ?s <urn:test:p> <urn:test:o> }
+WHERE {
+  VALUES ?holder { UNDEF }
+  { BIND(?holder AS ?s) } UNION { FILTER(false) }
+}
+```
+
+The outer `VALUES` makes `?holder` eligible for `bindings=`, but does not supply it to the
+branch's BIND. Even replacing `UNDEF` with `<urn:test:holder>` and omitting `bindings=`
+returns an empty graph. This follows SPARQL's group evaluation: the branch's
+[Extend](https://www.w3.org/TR/sparql11-query/#defn_extend) leaves `?s` unbound when its
+expression errors, and [CONSTRUCT](https://www.w3.org/TR/sparql11-query/#construct) omits
+triples containing an unbound variable. It is not an error response. A `VALUES` inside the
+branch before its BIND can supply the expression's input.
+
+For a supplied subject and optional graph content, use the supplied variable directly in
+the template. This produces `<urn:test:holder> <urn:test:p> <urn:test:o>` with the same
+`bindings=` even when no graph matches:
+
+```sparql
+CONSTRUCT { ?holder <urn:test:p> <urn:test:o> }
+WHERE {
+  OPTIONAL { GRAPH ?atom { ?holder <urn:test:missing> ?value } }
+}
+```
+
+The refusal for variables outside the query's projection stays intentional: silently dropping
+one could silently remove a caller's intended restriction. Helpers sharing a bindings object
+across queries should pass only each query's declared parameters, and SELECT queries must
+project those parameters. Adding an outer `VALUES … UNDEF` can make a variable eligible for
+binding, but does not make nested BIND expressions read it.
+
 ## Shared-store variant
 
 `space_with_store(store: Arc<ikigai_sparql::Store>)` binds the same four IRIs — **plus
