@@ -76,11 +76,20 @@ reasonable's axiomatic/reflexive conclusions, even on `urn:reason:inferred` or
 with `omit-thing=true`.
 
 The input bound is checked before calling `reason()`: reasonable cannot be
-interrupted, and wasm has no thread on which to time it out. This limits the
-work admitted to reasoning, **not a wall-clock deadline**. The output bound is
-checked after materialization, so it does not limit peak memory inside the
-engine. Even a small schema can produce a quadratic closure. Graph resolution
-and representation bytes remain subject to the host kernel's own budgets.
+interrupted, and wasm has no thread on which to time it out. This is **not a
+wall-clock deadline**, and at the defaults it does not bound the work either.
+The output bound is checked after materialization, so it does not limit time or
+peak memory inside the engine. Equality is the worst case: an `owl:sameAs` class
+of `k` members is materialized as all `k²` pairs, with every triple about a
+member copied to every other member. An 801-triple input (~23 KB of Turtle, a
+chain of `owl:sameAs`) held a core for 167 s and peaked at 9.4 GB in a release
+build before it was refused as `OverBudget`, and equality inferred from an
+`owl:FunctionalProperty` does the same without `owl:sameAs`
+(`tests/closure_expansion.rs`, an ignored reproduction, ledger #3433). Until the
+reasoner can be stopped inside its loop, a host that serves untrusted graphs
+lowers `max_input_triples` (a 201-triple chain took 2.2 s) or keeps these
+resources off the request path. Graph resolution and representation bytes remain
+subject to the host kernel's own budgets.
 Parser depth scans reuse ikigai-rdf's bounds; native parsing uses a sized stack.
 
 A missing graph is `NotFound`; a non-RDF or malformed RDF input is
