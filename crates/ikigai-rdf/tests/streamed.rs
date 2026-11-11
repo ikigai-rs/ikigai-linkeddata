@@ -91,7 +91,7 @@ fn doc() -> ArgRef {
 const TARGETS: [&str; 3] = [
     "application/n-triples",
     "application/n-quads",
-    "nt", // an alias: the bytes path answers it as its own media type, and so does the stream
+    "nt", // an alias: both paths answer the canonical application/n-triples media type
 ];
 
 const DOCS: [&str; 5] = [
@@ -292,4 +292,88 @@ fn a_plan_hands_the_transreptor_the_stream_uncollected() {
         .map(|chunk| chunk.unwrap().iter().filter(|&&b| b == b'\n').count())
         .sum();
     assert!(lines > 1024 * 40, "{lines}");
+}
+
+#[test]
+fn dataset_syntax_survives_every_chunk_boundary_and_late_disambiguation() {
+    let common = "<urn:test:s> <urn:test:p> _:a .\n".repeat(100);
+    let docs = [
+        format!("{common}<urn:test:s> <urn:test:p> _:a <urn:test:g> .\n_:a <urn:test:p> <urn:test:o> _:a ."),
+        format!("{common}<urn:test:g> {{ _:a <urn:test:p> <urn:test:o> . }}"),
+        "{ <urn:test:s> <urn:test:p> <urn:test:o> . }".to_string(),
+        "{} <urn:test:g> { <urn:test:s> <urn:test:p> <urn:test:o> . }".to_string(),
+        "[] <urn:test:p> <urn:test:o> .".to_string(),
+        "[ a <urn:test:Class> ] <urn:test:p> <urn:test:o> .".to_string(),
+        r"<http://example.org/\u00E9> <urn:test:p> <urn:test:o> .".to_string(),
+    ];
+    for text in docs {
+        let f = fixture(vec![], 1 << 20);
+        let inline = transrept(ArgRef::Inline(text.as_bytes().to_vec()), "nq");
+        let expected = block_on(f.kernel.issue(inline, &Capability::root())).unwrap();
+        assert_eq!(expected.repr_type.media_type, "application/n-quads");
+        for size in [1, 2, 3, 7, 64, 4096] {
+            let f = fixture(split(text.as_bytes(), size), 1 << 20);
+            let result = block_on(
+                f.kernel
+                    .issue_body(transrept(doc(), "nq"), &Capability::root()),
+            )
+            .unwrap();
+            assert_eq!(result.repr_type, expected.repr_type);
+            let actual = block_on(result.bytes.collect(1 << 20)).unwrap();
+            assert_eq!(actual.as_ref(), expected.bytes, "chunks of {size}: {text}");
+        }
+    }
+}
+
+#[test]
+fn an_iri_longer_than_the_sniff_hold_uses_the_buffered_fallback() {
+    let text = format!(
+        "<http://example.org/{}> <urn:test:p> <urn:test:o> .",
+        "a".repeat(80_000)
+    );
+    let f = fixture(split(text.as_bytes(), 4096), 1 << 20);
+    let result = block_on(
+        f.kernel
+            .issue_body(transrept(doc(), "nq"), &Capability::root()),
+    )
+    .unwrap();
+    let actual = block_on(result.bytes.collect(1 << 20)).unwrap();
+    assert_eq!(actual.as_ref(), format!("{text}\n").as_bytes());
+}
+
+#[test]
+fn streamed_src_resolves_relative_iris_against_retrieval_and_document_bases() {
+    for (text, expected) in [
+        ("<s> <http://example.org/p> <o> .", "<https://example.org/docs/s> <http://example.org/p> <https://example.org/docs/o> .\n"),
+        ("@base <https://example.org/override/> . <s> <http://example.org/p> <o> .", "<https://example.org/override/s> <http://example.org/p> <https://example.org/override/o> .\n"),
+    ] {
+        // A synthetic HTTP source with a declared Turtle type and a one-shot body.
+        struct TurtleSource(Producer);
+        #[async_trait]
+        impl Endpoint for TurtleSource {
+            async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+                self.invoke_body(inv).await?.collect_within(inv.memory_budget().unwrap()).await
+            }
+            async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
+                let mut result = self.0.invoke_body(inv).await?;
+                result.repr_type = ReprType::new("text/turtle");
+                Ok(result)
+            }
+        }
+        let source = TurtleSource(Producer {
+            chunks: Arc::new(Mutex::new(split(text.as_bytes(), 1))),
+            polled: Arc::new(AtomicUsize::new(0)),
+        });
+        let space = Fallback::new(vec![
+            Arc::new(ikigai_rdf::space()) as Arc<dyn Space>,
+            Arc::new(EndpointSpace::new().bind(Exact::new("urn:http:get"), source)),
+        ]);
+        let kernel = Kernel::new(Arc::new(space));
+        let request = Request::new(Verb::Source, Iri::parse("urn:rdf:transrept").unwrap())
+            .with_arg("src", ArgRef::Inline(b"https://example.org/docs/source".to_vec()))
+            .with_arg("as", ArgRef::Inline(b"nq".to_vec()));
+        let result = block_on(kernel.issue_body(request, &Capability::root())).unwrap();
+        let actual = block_on(result.bytes.collect(1 << 20)).unwrap();
+        assert_eq!(actual.as_ref(), expected.as_bytes());
+    }
 }

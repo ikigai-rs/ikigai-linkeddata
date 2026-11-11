@@ -44,6 +44,8 @@ mod serialize;
 #[cfg(feature = "transrept")]
 mod transrept;
 #[cfg(feature = "transrept")]
+mod turtle_family;
+#[cfg(feature = "transrept")]
 pub use serialize::serialize_turtle;
 #[cfg(feature = "transrept")]
 pub use transrept::{space, SPACE_ID};

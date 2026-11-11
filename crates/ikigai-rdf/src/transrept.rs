@@ -4,16 +4,16 @@ use crate::{
     BlankNodeLabels,
 };
 
+use crate::turtle_family::TurtleFamilyParser;
 use futures_util::StreamExt;
 use ikigai_core::{
     space_iri, ArgRef, ArgSpec, Body, ByteStream, Bytes, Description, Endpoint, EndpointSpace,
     Error, Exact, FailureClass, InputGroup, Invocation, Iri, ReprType, Representation, Result,
     Verb,
 };
-use oxrdf::{Graph, GraphName, Quad, Triple};
+use oxrdf::{Graph, Quad, Triple};
 use oxrdfio::{RdfFormat, RdfParser, RdfSerializer};
-use oxttl::turtle::LowLevelTurtleParser;
-use oxttl::TurtleParser;
+use std::borrow::Cow;
 
 /// The XSD `string` datatype IRI — the `class` of every by-value input here. An RDF
 /// document, a graph reference-or-document, a media type and a mode token are all
@@ -76,8 +76,12 @@ async fn with_graph(
         Some((iri, query)) => (iri, Some(query)),
         None => (with, None),
     };
-    let iri = Iri::parse(iri_str)
-        .map_err(|e| Error::Endpoint(format!("{who}: with= is neither Turtle nor an IRI: {e}")))?;
+    let iri = match Iri::parse(iri_str) {
+        Ok(iri) => iri,
+        // A Turtle document can also begin with a blank node or a SPARQL-style
+        // PREFIX/BASE directive. Whitespace in those documents rules out an IRI.
+        Err(_) => return parse_graph(with, who, "with", labels),
+    };
     let mut request = ikigai_core::Request::new(Verb::Source, iri);
     if let Some(query) = query {
         for pair in query.split('&') {
@@ -257,7 +261,13 @@ impl Endpoint for TransreptEndpoint {
                     return Err(both_given());
                 }
                 let source = resolve_src(inv, src).await?;
-                transrept_bytes(&source.bytes, "src", as_type)?
+                transrept_document(
+                    &source.bytes,
+                    "src",
+                    as_type,
+                    source_format(&source.repr_type.media_type),
+                    Some(src.trim()),
+                )?
             }
         };
         // Transreption is a pure function of its input bytes, so its output is *as
@@ -270,7 +280,7 @@ impl Endpoint for TransreptEndpoint {
         Ok(transrepted(&media, bytes))
     }
 
-    /// The body path (ledger #2278): Turtle (N-Triples with it) written as N-Triples or
+    /// The body path (ledger #2278): Turtle, TriG, N-Triples and N-Quads written as N-Triples or
     /// N-Quads is parsed AS IT ARRIVES and answered as a stream, one chunk of lines per chunk
     /// read, with the nesting bound counted on each chunk before the parser sees it. Every
     /// other pair, and every input that arrives as a buffer, is answered as [`invoke`]
@@ -279,7 +289,7 @@ impl Endpoint for TransreptEndpoint {
     /// [`invoke`]: Endpoint::invoke
     async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
         let as_type = inv.inline_str("as").unwrap_or("text/turtle");
-        let (arg, body) = match inv.request.args.get("src") {
+        let (arg, body, from, base) = match inv.request.args.get("src") {
             Some(ArgRef::Inline(src)) if !src.is_empty() => {
                 if streams_to(as_type).is_none() {
                     return self.invoke(inv).await.map(Representation::into_body);
@@ -288,7 +298,13 @@ impl Endpoint for TransreptEndpoint {
                     return Err(both_given());
                 }
                 let src = inv.inline_str("src")?;
-                ("src", resolve_src_body(inv, src).await?)
+                let source = resolve_src_body(inv, src).await?;
+                (
+                    "src",
+                    source.bytes,
+                    source_format(&source.repr_type.media_type),
+                    Some(src.trim().to_string()),
+                )
             }
             _ => match inv.request.args.get("content") {
                 // A buffer (or nothing) is the bytes path's, unchanged.
@@ -296,24 +312,32 @@ impl Endpoint for TransreptEndpoint {
                     return self.invoke(inv).await.map(Representation::into_body)
                 }
                 Some(_) if given(inv, "src") => return Err(both_given()),
-                Some(_) => ("content", inv.content_body("content").await?),
+                Some(_) => ("content", inv.content_body("content").await?, None, None),
             },
         };
         let held = match (streams_to(as_type), body) {
-            (Some(to), Body::Once(stream)) => sniff_stream(stream).await?.lines(arg, to),
-            (Some(to), Body::Replay(replay)) => sniff_stream(replay.open()).await?.lines(arg, to),
+            (Some(to), Body::Once(stream)) => {
+                sniff_source_stream(stream, from)
+                    .await?
+                    .lines(arg, to, base.clone())
+            }
+            (Some(to), Body::Replay(replay)) => sniff_source_stream(replay.open(), from)
+                .await?
+                .lines(arg, to, base.clone()),
             (_, body) => Err(body),
         };
         let stream = match held {
             Ok(stream) => stream,
             Err(body) => {
                 let bytes = inv.collect(body).await?;
-                let (media, bytes) = transrept_bytes(&bytes, arg, as_type)?;
+                let (media, bytes) =
+                    transrept_document(&bytes, arg, as_type, from, base.as_deref())?;
                 return Ok(transrepted(&media, bytes).into_body());
             }
         };
         Ok(Representation::from_body(
-            ReprType::new(media_base(as_type)).with_param("charset", "utf-8"),
+            ReprType::new(format_for(as_type).expect("stream target").media_type())
+                .with_param("charset", "utf-8"),
             Body::Once(stream),
         )
         .cacheable())
@@ -445,8 +469,7 @@ fn streams_to(as_type: &str) -> Option<RdfFormat> {
 }
 
 /// How much of a streamed input is held to [`sniff`] it before giving up and collecting it
-/// (a document opening with more whitespace than this): the opening `<…>` token needs
-/// [`ANGLE_SCAN`] bytes after the whitespace.
+/// (for example, a document opening with more whitespace than this, or a longer IRI).
 const SNIFF_HOLD: usize = 64 * 1024;
 
 /// A streamed input, its opening read: the chunks held for the sniff, the stream after them,
@@ -458,22 +481,12 @@ struct Sniffed {
 }
 
 /// Read the opening of `stream` until [`sniff`] would answer for it what it answers for the
-/// whole document (the first byte after the whitespace, and [`ANGLE_SCAN`] after it when that
-/// is a `<`), or it ends, or [`SNIFF_HOLD`] bytes are held undecided.
+/// whole document, or it ends, or [`SNIFF_HOLD`] bytes are held undecided. Bracketed
+/// openings wait for enough bytes to distinguish JSON-LD, Turtle and TriG.
 async fn sniff_stream(mut rest: ByteStream) -> Result<Sniffed> {
     let (mut prefix, mut held) = (Vec::new(), Vec::new());
     let mut ended = false;
-    let decided = |prefix: &[u8]| {
-        let rest = &prefix[prefix
-            .iter()
-            .take_while(|b| b.is_ascii_whitespace())
-            .count()..];
-        match rest.first() {
-            None => false,
-            Some(b'<') => rest.len() >= ANGLE_SCAN,
-            Some(_) => true,
-        }
-    };
+    let decided = |prefix: &[u8]| sniff_opening(prefix, false).is_some();
     while !decided(&prefix) && prefix.len() <= SNIFF_HOLD {
         match rest.next().await {
             Some(chunk) => {
@@ -487,8 +500,37 @@ async fn sniff_stream(mut rest: ByteStream) -> Result<Sniffed> {
             }
         }
     }
-    let format = (ended || decided(&prefix)).then(|| sniff(&prefix));
+    let format = sniff_opening(&prefix, ended);
     Ok(Sniffed { format, held, rest })
+}
+
+/// Only the six supported RDF input formats select a parser by media type.
+fn source_format(media: &str) -> Option<RdfFormat> {
+    RdfFormat::from_media_type(media).filter(|format| {
+        matches!(
+            format,
+            RdfFormat::Turtle
+                | RdfFormat::TriG
+                | RdfFormat::NTriples
+                | RdfFormat::NQuads
+                | RdfFormat::RdfXml
+                | RdfFormat::JsonLd { .. }
+        )
+    })
+}
+
+/// A resolved resource's RDF media type resolves otherwise ambiguous openings
+/// such as a relative Turtle subject `<s>` versus an XML element.
+async fn sniff_source_stream(rest: ByteStream, from: Option<RdfFormat>) -> Result<Sniffed> {
+    if let Some(format) = from {
+        Ok(Sniffed {
+            format: Some(format),
+            held: Vec::new(),
+            rest,
+        })
+    } else {
+        sniff_stream(rest).await
+    }
 }
 
 impl Sniffed {
@@ -498,17 +540,24 @@ impl Sniffed {
         Body::once(held.chain(self.rest))
     }
 
-    /// The input transrepted to `to` as a stream of lines when it is Turtle, else the input
+    /// The Turtle-family input transrepted to `to` as a stream of lines, else the input
     /// back, whole, for the bytes path.
-    fn lines(self, arg: &'static str, to: RdfFormat) -> std::result::Result<ByteStream, Body> {
+    fn lines(
+        self,
+        arg: &'static str,
+        to: RdfFormat,
+        base: Option<String>,
+    ) -> std::result::Result<ByteStream, Body> {
         match self.format {
-            Some(RdfFormat::Turtle) => Ok(turtle_lines(self.body().into_stream(), arg, to)),
+            Some(RdfFormat::Turtle | RdfFormat::TriG | RdfFormat::NTriples | RdfFormat::NQuads) => {
+                Ok(turtle_lines(self.body().into_stream(), arg, to, base))
+            }
             _ => Err(self.body()),
         }
     }
 }
 
-/// Turtle read from `input` and written as `to` (N-Triples or N-Quads) AS IT IS READ: every
+/// Turtle-family RDF read from `input` and written as `to` (N-Triples or N-Quads) AS IT IS READ: every
 /// chunk is scanned for nesting ([`TurtleNesting`], refused past [`MAX_TURTLE_NESTING`]
 /// before the parser sees a byte of it), handed to oxttl's push parser, and answered as the
 /// lines of the statements it completed. The same parser, the same blank-node labels and the
@@ -516,11 +565,16 @@ impl Sniffed {
 /// parse error or a refusal ends the stream as an error item, never a clean end.
 ///
 /// [`MAX_TURTLE_NESTING`]: crate::MAX_TURTLE_NESTING
-fn turtle_lines(input: ByteStream, arg: &'static str, to: RdfFormat) -> ByteStream {
+fn turtle_lines(
+    input: ByteStream,
+    arg: &'static str,
+    to: RdfFormat,
+    base: Option<String>,
+) -> ByteStream {
     struct Lines {
         input: ByteStream,
         scan: TurtleNesting<'static>,
-        parser: LowLevelTurtleParser,
+        parser: TurtleFamilyParser,
         labels: BlankNodeLabels,
         to: RdfFormat,
         ended: bool,
@@ -530,10 +584,8 @@ fn turtle_lines(input: ByteStream, arg: &'static str, to: RdfFormat) -> ByteStre
         fn drain(&mut self) -> Result<Vec<u8>> {
             let mut out = Vec::new();
             let mut serializer = RdfSerializer::from_format(self.to).for_writer(&mut out);
-            while let Some(triple) = self.parser.parse_next() {
-                let triple =
-                    triple.map_err(|e| Error::Endpoint(format!("RDF parse error: {e}")))?;
-                let quad = self.labels.quad(triple.in_graph(GraphName::DefaultGraph));
+            for quad in self.parser.drain()? {
+                let quad = self.labels.quad(quad);
                 serializer
                     .serialize_quad(&quad)
                     .map_err(|e| Error::Endpoint(format!("RDF serialize error: {e}")))?;
@@ -544,10 +596,14 @@ fn turtle_lines(input: ByteStream, arg: &'static str, to: RdfFormat) -> ByteStre
             Ok(out)
         }
     }
+    let parser = match TurtleFamilyParser::new(base.as_deref()) {
+        Ok(parser) => parser,
+        Err(error) => return Box::pin(futures_util::stream::once(async { Err(error) })),
+    };
     let lines = Lines {
         input,
         scan: TurtleNesting::new(arg),
-        parser: TurtleParser::new().low_level(),
+        parser,
         labels: BlankNodeLabels::new(),
         to,
         ended: false,
@@ -602,19 +658,19 @@ async fn resolve_src(inv: &Invocation<'_>, src: &str) -> Result<Representation> 
 }
 
 /// [`resolve_src`], answered as the body the source produced (a stream stays one).
-async fn resolve_src_body(inv: &Invocation<'_>, src: &str) -> Result<Body> {
+async fn resolve_src_body(inv: &Invocation<'_>, src: &str) -> Result<Representation<Body>> {
     let src = src.trim();
     if src.starts_with("http://") || src.starts_with("https://") {
         let get = Iri::parse(HTTP_GET).expect("the HTTP GET name is a valid IRI");
         let request = ikigai_core::Request::new(Verb::Source, get)
             .with_arg("url", ArgRef::Inline(src.as_bytes().to_vec()));
-        return Ok(inv.issue_body(request).await?.bytes);
+        return inv.issue_body(request).await;
     }
     let iri = Iri::parse(src).map_err(|e| Error::InvalidArgument {
         name: "src".to_string(),
         detail: format!("`{src}` is not an IRI: {e}"),
     })?;
-    Ok(inv.source_body(&iri).await?.bytes)
+    inv.source_body(&iri).await
 }
 
 /// The pure transformation, factored out so it's testable without an [`Invocation`]:
@@ -624,7 +680,17 @@ async fn resolve_src_body(inv: &Invocation<'_>, src: &str) -> Result<Body> {
 /// `arg` names the argument the document arrived in (`content`, or `src` for a resolved
 /// one), which a depth refusal names.
 fn transrept_bytes(input: &[u8], arg: &str, as_type: &str) -> Result<(String, Vec<u8>)> {
-    let from = sniff(input);
+    transrept_document(input, arg, as_type, None, None)
+}
+
+fn transrept_document(
+    input: &[u8],
+    arg: &str,
+    as_type: &str,
+    from: Option<RdfFormat>,
+    base: Option<&str>,
+) -> Result<(String, Vec<u8>)> {
+    let from = from.unwrap_or_else(|| sniff(input));
     // Bound nesting before any parser, serializer or `Display` recurses over it, with the scan
     // that matches the parser `from` selects: triple-term depth for RDF/XML and for everything
     // oxttl reads (ledger #992); JSON depth for JSON-LD, which carries no triple terms but whose
@@ -634,23 +700,46 @@ fn transrept_bytes(input: &[u8], arg: &str, as_type: &str) -> Result<(String, Ve
         RdfFormat::RdfXml => check_rdfxml_nesting(input, arg)?,
         RdfFormat::JsonLd { .. } => {
             check_json_nesting(input, arg)?;
-            return depth::on_json_ld_stack(|| convert(input, from, as_type));
+            return depth::on_json_ld_stack(|| convert(input, from, as_type, base));
         }
         _ => check_turtle_nesting(&String::from_utf8_lossy(input), arg)?,
     }
-    convert(input, from, as_type)
+    convert(input, from, as_type, base)
 }
 
 /// Parse `input` as `from` and serialize it as `as_type`: the half of [`transrept_bytes`] after
 /// the bounds, run on the JSON-LD thread when `from` is JSON-LD.
-fn convert(input: &[u8], from: RdfFormat, as_type: &str) -> Result<(String, Vec<u8>)> {
+fn convert(
+    input: &[u8],
+    from: RdfFormat,
+    as_type: &str,
+    base: Option<&str>,
+) -> Result<(String, Vec<u8>)> {
     // Transreption streams, so its order is the document's and needs no sorting; but the
     // parser labels anonymous nodes at random, so every face relabels them in document order
     // (ledger #1566).
     let mut labels = BlankNodeLabels::new();
-    let quads = RdfParser::from_format(from)
-        .for_slice(input)
-        .map(move |quad| quad.map(|quad| labels.quad(quad)));
+    let parsed: Box<dyn Iterator<Item = Result<Quad>> + '_> = if matches!(
+        from,
+        RdfFormat::Turtle | RdfFormat::TriG | RdfFormat::NTriples | RdfFormat::NQuads
+    ) {
+        Box::new(TurtleFamilyParser::for_slice(input, base)?)
+    } else {
+        let mut parser = RdfParser::from_format(from);
+        if let Some(base) = base {
+            parser = parser.with_base_iri(base).map_err(|e| {
+                Error::Endpoint(format!(
+                    "urn:rdf:transrept: src base IRI is invalid: {e}. Supply an absolute src IRI."
+                ))
+            })?;
+        }
+        Box::new(
+            parser
+                .for_slice(input)
+                .map(|quad| quad.map_err(|e| Error::Endpoint(format!("RDF parse error: {e}")))),
+        )
+    };
+    let quads = parsed.map(move |quad| quad.map(|quad| labels.quad(quad)));
 
     // The human view: a subject/predicate/object table over the parsed triples.
     if media_base(as_type) == "text/html" {
@@ -669,7 +758,7 @@ fn convert(input: &[u8], from: RdfFormat, as_type: &str) -> Result<(String, Vec<
     let mut out = Vec::new();
     let mut serializer = RdfSerializer::from_format(to).for_writer(&mut out);
     for quad in quads {
-        let quad = quad.map_err(|e| Error::Endpoint(format!("RDF parse error: {e}")))?;
+        let quad = quad?;
         serializer
             .serialize_quad(&quad)
             .map_err(|e| Error::Endpoint(format!("RDF serialize error: {e}")))?;
@@ -677,26 +766,69 @@ fn convert(input: &[u8], from: RdfFormat, as_type: &str) -> Result<(String, Vec<
     serializer
         .finish()
         .map_err(|e| Error::Endpoint(format!("RDF serialize error: {e}")))?;
-    Ok((media_base(as_type).to_string(), out))
+    Ok((to.media_type().to_string(), out))
 }
 
-/// Sniff the input syntax from its opening token: `{`/`[` ⇒ JSON-LD; a leading `<…>`
-/// that is an IRI (`<scheme:…>`) ⇒ Turtle/N-Triples (a triple's subject), whereas a
-/// leading `<` opening an XML element (`<?xml`, `<rdf:RDF`, `<Foo`) ⇒ RDF/XML; anything
-/// else (`@prefix`, a prefixed name, a comment) ⇒ Turtle, which subsumes N-Triples.
-/// The IRI-vs-element test is [`angle_token_is_iri`] — both syntaxes open with `<`.
+/// Distinguish JSON-LD and XML from the Turtle family by their opening tokens.
+/// Braces and brackets also open TriG graphs and Turtle blank-node property lists,
+/// so inspect the following token. The family parser distinguishes Turtle/TriG
+/// from N-Triples/N-Quads while reading their shared syntax.
 fn sniff(bytes: &[u8]) -> RdfFormat {
-    let rest = &bytes[bytes.iter().take_while(|b| b.is_ascii_whitespace()).count()..];
-    match rest.first() {
-        Some(b'{') | Some(b'[') => json_ld(),
+    sniff_opening(bytes, true).unwrap_or(RdfFormat::Turtle)
+}
+
+/// `None` means a streamed prefix needs more bytes to distinguish the syntaxes.
+fn sniff_opening(bytes: &[u8], ended: bool) -> Option<RdfFormat> {
+    let trim = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .unwrap_or(bytes.len())
+    };
+    let rest = &bytes[trim(bytes)..];
+    Some(match rest.first() {
+        None if !ended => return None,
+        Some(b'{') | Some(b'[') => {
+            let tail = &rest[1..];
+            let tail = &tail[trim(tail)..];
+            let json = match (rest[0], tail.first()) {
+                (_, None) if !ended => return None,
+                (b'{', Some(b'"')) => true,
+                (b'{', Some(b'}')) | (b'[', Some(b']')) => {
+                    let after = &tail[1..];
+                    if trim(after) == after.len() && !ended {
+                        return None;
+                    }
+                    trim(after) == after.len()
+                }
+                (b'{', _) => false,
+                (b'[', Some(b'<' | b'_' | b':' | b'#')) => false,
+                (b'[', Some(b)) if b.is_ascii_alphabetic() || *b >= 0x80 => {
+                    let end = tail
+                        .iter()
+                        .position(|b| b.is_ascii_whitespace() || matches!(b, b':' | b']'));
+                    let Some(end) = end else {
+                        if !ended {
+                            return None;
+                        }
+                        return Some(json_ld());
+                    };
+                    tail[end] != b':' && &tail[..end] != b"a"
+                }
+                _ => true,
+            };
+            if json {
+                json_ld()
+            } else {
+                RdfFormat::Turtle
+            }
+        }
+        Some(b'<') if !ended && !rest.contains(&b'>') => return None,
         Some(b'<') if angle_token_is_iri(rest) => RdfFormat::Turtle,
         Some(b'<') => RdfFormat::RdfXml,
         _ => RdfFormat::Turtle,
-    }
+    })
 }
-
-/// How many opening bytes the `<…>` test scans for the closing bracket.
-const ANGLE_SCAN: usize = 2048;
 
 /// For a leading `<…>` token, whether it is a Turtle/N-Triples IRI subject rather than an
 /// XML start tag — the whole of the distinction, since both syntaxes open with `<`.
@@ -706,8 +838,8 @@ const ANGLE_SCAN: usize = 2048;
 /// read as an element tag, and a Turtle document went to the RDF/XML parser to die as
 /// `Unknown prefix urn:`. Three cheap signals replace it, all on the bracketed token:
 ///
-/// 1. it closes within the scan window with no character Turtle's `IRIREF` production
-///    forbids before the `>` — which rules out every start tag carrying attributes, plus
+/// 1. it closes with no character Turtle's `IRIREF` production forbids before the `>`
+///    (Unicode escapes are admitted) — which rules out every start tag carrying attributes, plus
 ///    `<?xml …?>` and `<!DOCTYPE …>`;
 /// 2. the text before its first `:` is a URI scheme ([`is_uri_scheme`]) with something
 ///    after the colon — `<doc>` and `<html>` carry no scheme at all;
@@ -719,21 +851,55 @@ const ANGLE_SCAN: usize = 2048;
 ///
 /// The residue is a single-colon, all-name-character IRI such as `<urn:x>`, which reads as
 /// a tag: nothing in the token separates the two shapes, and ikigai's own URNs are
-/// `urn:nid:nss`. Kept in step with the copies in `ikigai-sniff` and `ikigai-sparql`.
+/// `urn:nid:nss`. Related sniffers also exist in `ikigai-sniff` and `ikigai-sparql`.
 fn angle_token_is_iri(rest: &[u8]) -> bool {
-    let window = &rest[1..rest.len().min(ANGLE_SCAN)];
+    let window = &rest[1..];
     let Some(end) = window.iter().position(|&b| b == b'>') else {
-        return false; // unterminated within the window: not an IRI reference
+        return false; // unterminated: not an IRI reference
     };
-    let token = &window[..end];
-    if !token.iter().all(|&b| is_iri_char(b)) {
+    let Some(token) = iri_token(&window[..end]) else {
         return false;
-    }
+    };
     let Some(colon) = token.iter().position(|&b| b == b':') else {
         return false;
     };
     let (scheme, after_scheme) = token.split_at(colon);
-    is_uri_scheme(scheme) && after_scheme.len() > 1 && !is_xml_qname(token)
+    is_uri_scheme(scheme)
+        && after_scheme.len() > 1
+        && (!is_xml_qname(&token) || window[..end].contains(&b'\\'))
+}
+
+/// Decode Unicode escapes for classification only. The RDF parser still receives
+/// the original bytes, so this does not change the terms being transrepted.
+fn iri_token(token: &[u8]) -> Option<Cow<'_, [u8]>> {
+    if !token.contains(&b'\\') {
+        return token
+            .iter()
+            .all(|&byte| is_iri_char(byte))
+            .then_some(Cow::Borrowed(token));
+    }
+    let mut decoded = Vec::with_capacity(token.len());
+    let mut rest = token;
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte == b'\\' {
+            let digits = match tail.first() {
+                Some(b'u') => 4,
+                Some(b'U') => 8,
+                _ => return None,
+            };
+            let hex = std::str::from_utf8(tail.get(1..=digits)?).ok()?;
+            let character = char::from_u32(u32::from_str_radix(hex, 16).ok()?)?;
+            decoded.extend_from_slice(character.encode_utf8(&mut [0; 4]).as_bytes());
+            rest = &tail[digits + 1..];
+        } else {
+            decoded.push(byte);
+            rest = tail;
+        }
+    }
+    decoded
+        .iter()
+        .all(|&byte| is_iri_char(byte))
+        .then_some(Cow::Owned(decoded))
 }
 
 /// Whether a byte may appear inside a Turtle `IRIREF`. The production excludes the ASCII
@@ -797,13 +963,11 @@ fn json_ld() -> RdfFormat {
 }
 
 /// Render the parsed triples as an HTML table — the "RDF is just data" view.
-fn to_html<E: std::fmt::Display>(
-    quads: impl Iterator<Item = std::result::Result<Quad, E>>,
-) -> Result<String> {
+fn to_html(quads: impl Iterator<Item = Result<Quad>>) -> Result<String> {
     let mut rows = String::new();
     let mut count = 0usize;
     for quad in quads {
-        let quad = quad.map_err(|e| Error::Endpoint(format!("RDF parse error: {e}")))?;
+        let quad = quad?;
         rows.push_str(&format!(
             "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
             esc(&quad.subject.to_string()),
