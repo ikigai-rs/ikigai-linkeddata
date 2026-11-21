@@ -29,7 +29,8 @@ futures = "0.3"
 # examples/choosing.rs measures a SPARQL property path beside the reasoner (ledger #2640).
 # Match the RDF 1.2 adapter support enabled by the reasoner.
 ikigai-sparql = { path = "../ikigai-sparql", features = ["rdf-12"] }
-ikigai-conformance = "0.14.0"
+# 0.15.0 is conformance on ikigai-core 0.4 (the core 0.4.0 cascade).
+ikigai-conformance = "0.15.0"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }

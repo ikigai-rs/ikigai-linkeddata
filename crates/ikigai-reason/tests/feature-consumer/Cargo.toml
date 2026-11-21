@@ -14,5 +14,6 @@ ikigai-sparql = { path = "../../../ikigai-sparql" }
 ikigai-rdf = { path = "../../../ikigai-rdf", features = ["rdf-12"] }
 
 [dev-dependencies]
-ikigai-core = "0.3.0"
+# core 0.4.0 (scope opacity, structured denials; the cascade).
+ikigai-core = "0.4.0"
 futures = "0.3"
