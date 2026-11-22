@@ -310,3 +310,60 @@ fn relative_external_content_is_a_documented_loss() {
         .iter()
         .all(|t| t.predicate.as_str() != format!("{}hasFormat", vocab::DCTERMS)));
 }
+
+#[test]
+fn invalid_utf8_is_rejected_instead_of_replaced() {
+    let feed = b"<rss version=\"2.0\"><channel><title>Bad \xff title</title></channel></rss>";
+    assert!(lift(feed, Some(BASE)).is_err());
+}
+
+#[test]
+fn atom_leap_second_is_preserved() {
+    let feed = atom("<entry><id>urn:entry</id><title>Entry</title><published>2016-12-31T23:59:60Z</published></entry>");
+    let graph = lift(feed.as_bytes(), Some(BASE)).unwrap();
+    assert_eq!(
+        values(&graph, vocab::DCTERMS, "issued"),
+        ["2016-12-31T23:59:60Z"]
+    );
+}
+
+#[test]
+fn rss1_short_latin1_subject_is_decoded_using_xml_declaration() {
+    let feed = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns=\"http://purl.org/rss/1.0/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><channel rdf:about=\"https://example.org/feed\"><title>Feed</title><dc:subject>caf\xe9</dc:subject></channel></rdf:RDF>";
+    let graph = lift(feed, Some(BASE)).unwrap();
+    assert_eq!(values(&graph, vocab::DC, "subject"), ["café"]);
+}
+
+#[test]
+fn rss_three_digit_year_follows_rfc5322() {
+    let feed = br#"<rss version="2.0"><channel><title>Feed</title><item><title>Entry</title><pubDate>07 Oct 105 12:00:00 GMT</pubDate></item></channel></rss>"#;
+    let graph = lift(feed, Some(BASE)).unwrap();
+    assert_eq!(
+        values(&graph, vocab::DCTERMS, "issued"),
+        ["2005-10-07T12:00:00Z"]
+    );
+}
+
+#[test]
+fn rss1_latin1_subject_after_padding_is_decoded() {
+    let mut feed = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>".to_vec();
+    feed.extend_from_slice(format!("<!--{}-->", "x".repeat(1024)).as_bytes());
+    feed.extend_from_slice(b"<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns=\"http://purl.org/rss/1.0/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><channel rdf:about=\"https://example.org/feed\"><title>Feed</title><dc:subject>caf\xe9</dc:subject></channel></rdf:RDF>");
+    let graph = lift(&feed, Some(BASE)).unwrap();
+    assert_eq!(values(&graph, vocab::DC, "subject"), ["café"]);
+}
+
+#[test]
+fn utf16_bom_feed_is_decoded() {
+    let input = "<?xml version=\"1.0\" encoding=\"UTF-16\"?><rss version=\"2.0\"><channel><title>Café</title></channel></rss>";
+    let mut bytes = vec![0xff, 0xfe];
+    bytes.extend(input.encode_utf16().flat_map(u16::to_le_bytes));
+    let graph = lift(&bytes, Some(BASE)).unwrap();
+    assert_eq!(values(&graph, vocab::RSS, "title"), ["Café"]);
+}
+
+#[test]
+fn long_non_utf8_declaration_is_refused_without_panicking() {
+    let feed = format!("<?xml version=\"1.0\"{}encoding=\"ISO-8859-1\"?><rss><channel><title>Feed</title></channel></rss>", " ".repeat(64));
+    assert!(lift(feed.as_bytes(), Some(BASE)).is_err());
+}

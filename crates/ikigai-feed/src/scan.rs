@@ -21,6 +21,7 @@
 //! before using one.
 
 use ikigai_core::{Error, Result};
+use quick_xml::encoding::DecodingReader;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::NsReader;
@@ -109,7 +110,7 @@ pub const ACCEPTED: &str =
 /// Scan `bytes`, refusing a body that is not well-formed XML, does not open with a feed root,
 /// or nests deeper than [`MAX_FEED_DEPTH`].
 pub fn scan(bytes: &[u8]) -> Result<Scan> {
-    let mut reader = NsReader::from_reader(bytes);
+    let mut reader = NsReader::from_reader(DecodingReader::new(bytes));
     reader.config_mut().expand_empty_elements = true;
     // One entry per open element: the `xml:lang` in effect inside it.
     let mut langs: Vec<Option<String>> = Vec::new();
@@ -121,12 +122,27 @@ pub fn scan(bytes: &[u8]) -> Result<Scan> {
     let mut source_depth: Option<usize> = None;
     // The element whose text is being kept, its depth, and the text so far.
     let mut text: Option<(Text, usize, String)> = None;
+    let mut buf = Vec::new();
+    let mut first_event = true;
     loop {
-        let (ns, event) = match reader.read_resolved_event() {
+        let (ns, event) = match reader.read_resolved_event_into(&mut buf) {
             Ok((ns, event)) => (namespace(ns), event),
             Err(e) => return Err(invalid(format!("not well-formed XML: {e}; {ACCEPTED}"))),
         };
         match event {
+            Event::Decl(ref decl) if first_event => {
+                if let Some(encoding) = decl.encoder() {
+                    if encoding != reader.get_ref().encoding() {
+                        // DecodingReader can switch only while its 64-byte prefix is retained.
+                        if reader.buffer_position() >= 64 {
+                            return Err(invalid(
+                                "shorten the XML declaration to decode its encoding",
+                            ));
+                        }
+                        reader.get_mut().set_encoding(encoding);
+                    }
+                }
+            }
             Event::Start(element) => {
                 let depth = langs.len() + 1;
                 if depth > MAX_FEED_DEPTH {
@@ -285,6 +301,8 @@ pub fn scan(bytes: &[u8]) -> Result<Scan> {
             Event::Eof => break,
             _ => {}
         }
+        first_event = false;
+        buf.clear();
     }
     match found {
         Some(scan) if scan.root != Root::Rdf || scan.channel => Ok(scan),
@@ -327,8 +345,8 @@ fn namespace(ns: ResolveResult<'_>) -> Option<String> {
 
 /// The value of attribute `local` on `element`: in namespace `ns`, or, with `ns` `None`, the
 /// attribute written exactly as `local` (an unprefixed name, or `xml:lang` spelled out).
-fn attribute(
-    reader: &NsReader<&[u8]>,
+fn attribute<R: std::io::BufRead>(
+    reader: &NsReader<R>,
     element: &BytesStart<'_>,
     ns: Option<&str>,
     local: &str,
