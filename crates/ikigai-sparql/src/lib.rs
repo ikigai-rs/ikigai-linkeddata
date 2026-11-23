@@ -483,13 +483,15 @@ fn load_relabeled(
     parser: RdfParser,
     bytes: &[u8],
     labels: &mut BlankNodeLabels,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<usize, String> {
     labels.new_document();
     let mut quads = Vec::new();
     for quad in parser.for_slice(bytes) {
         quads.push(labels.quad(quad.map_err(|e| e.to_string())?));
     }
-    store.extend(quads).map_err(|e| e.to_string())
+    let loaded = quads.len();
+    store.extend(quads).map_err(|e| e.to_string())?;
+    Ok(loaded)
 }
 
 /// Copy every named graph's triples into the per-query `store`'s default graph, which is then
@@ -614,20 +616,25 @@ impl Endpoint for SparqlEndpoint {
             let graph = NamedNodeRef::new(uri)
                 .map_err(|e| Error::Endpoint(format!("graph name `{uri}` is not an IRI: {e}")))?;
             check_source(uri, format, &source.bytes)?;
-            sources.push((graph, format, source));
+            let plain_json =
+                media_base(source.repr_type.media_type.as_str()).eq_ignore_ascii_case(PLAIN_JSON);
+            sources.push((graph, format, source, plain_json));
         }
         if !sources.is_empty() {
             // The thread's floor, `STACK_BASE`, is the stack the load needs: no query text is
             // parsed here, so none is passed to size it by (see the assertion after `check_source`).
             limits::on_sparql_stack("", || {
-                for (graph, format, source) in &sources {
-                    load_relabeled(
+                for (graph, format, source, plain_json) in &sources {
+                    let loaded = load_relabeled(
                         &store,
                         RdfParser::from_format(*format).with_default_graph(*graph),
                         &source.bytes,
                         &mut labels,
                     )
                     .map_err(|e| Error::Endpoint(format!("loading <{}>: {e}", graph.as_str())))?;
+                    if *plain_json && loaded == 0 {
+                        return Err(refuse_empty_json(graph.as_str()));
+                    }
                 }
                 Ok(())
             })?;
@@ -1014,6 +1021,63 @@ async fn resolve_graph(inv: &Invocation<'_>, uri: &str) -> Result<Representation
     }
 }
 
+/// Plain JSON, which oxigraph reads as JSON-LD. Most JSON is not JSON-LD: with no `@context`
+/// and no IRI keys it expands to NO triples, so a source whose default face is JSON loaded as
+/// an empty graph with no error (ledger #4101). A source of this type is asked for an RDF face
+/// first ([`rdf_face`]), and is refused if it still yields nothing ([`refuse_empty_json`]).
+const PLAIN_JSON: &str = "application/json";
+
+/// The RDF faces [`rdf_face`] asks a plain-JSON source for, in order of preference.
+const RDF_FACES: [&str; 2] = ["text/turtle", "application/n-triples"];
+
+/// Ask a `urn:`/`file:` source whose default face is plain JSON for an RDF face, by issuing
+/// the same `Source` request with `as=` naming each of [`RDF_FACES`] in turn. The first answer
+/// whose type names an RDF syntax other than JSON is the source to load; `None` when the
+/// source offers none (it ignored `as=`, answered JSON again, or refused it), so the caller
+/// goes on with the JSON it has. Each request is issued through the kernel, which records it
+/// as a dependency like the source itself.
+///
+/// Not for `http(s)://` sources, which are fetched through the HTTP module rather than issued
+/// directly: those meet only [`refuse_empty_json`].
+async fn rdf_face(inv: &Invocation<'_>, uri: &str) -> Result<Option<(RdfFormat, Representation)>> {
+    if uri.starts_with("http://") || uri.starts_with("https://") {
+        return Ok(None);
+    }
+    let iri =
+        Iri::parse(uri).map_err(|e| Error::Endpoint(format!("bad graph IRI `{uri}`: {e}")))?;
+    for face in RDF_FACES {
+        let request = Request::new(Verb::Source, iri.clone())
+            .with_arg("as", ArgRef::Inline(face.as_bytes().to_vec()));
+        let Ok(answer) = inv.issue(request).await else {
+            continue;
+        };
+        let media = media_base(answer.repr_type.media_type.as_str());
+        if media.eq_ignore_ascii_case(PLAIN_JSON) {
+            continue;
+        }
+        if let Some(format) = rdf_format(media) {
+            return Ok(Some((format, answer)));
+        }
+    }
+    Ok(None)
+}
+
+/// Refuse a `graph=` source served as plain JSON that loaded no triples: it is almost surely
+/// JSON that is not JSON-LD, and loading it as an empty graph would make every pattern over it
+/// answer "none" with no error (ledger #4101). Refused as a typed `InvalidArgument` on `graph`,
+/// naming the source and its type, remedy first.
+fn refuse_empty_json(uri: &str) -> Error {
+    Error::InvalidArgument {
+        name: "graph".to_owned(),
+        detail: format!(
+            "List a source that serves RDF (Turtle, N-Triples, or JSON-LD with a @context), or \
+             bind a transreptor from its JSON to RDF: the source <{uri}> answered {PLAIN_JSON} \
+             with no triples in it and offered no {} face, so it would load as an empty graph.",
+            RDF_FACES.join(" or ")
+        ),
+    }
+}
+
 /// The RDF types a `graph=` source is transrepted TO when its own type is not one the loader
 /// parses, in order of preference: Turtle, the kernel's canonical hub and so the type a
 /// transreptor is likeliest to reach, then N-Quads, for a source whose natural form is a dataset.
@@ -1022,7 +1086,9 @@ const TRANSREPTION_TARGETS: [&str; 2] = ["text/turtle", "application/n-quads"];
 /// A `graph=` source as something the loader can parse: the source itself when its type names
 /// an RDF syntax ([`rdf_format`]), else the source TRANSREPTED to RDF through the kernel when
 /// a transreptor chain reaches one of [`TRANSREPTION_TARGETS`] (ledger #1442), else the source
-/// with its syntax [`sniff`]ed, as every unparseable source was before.
+/// with its syntax [`sniff`]ed, as every unparseable source was before. A source served as
+/// plain `application/json` is first asked for an RDF face ([`rdf_face`]), since most JSON is
+/// not JSON-LD and would load as an empty graph.
 ///
 /// ⚠ **The kernel does not transrept a `Source` answer because the request carries `as=`**:
 /// `as=` is an argument the TARGET may or may not honor, so asking for Turtle on the request
@@ -1045,6 +1111,11 @@ async fn parseable(
     source: Representation,
 ) -> Result<(RdfFormat, Representation)> {
     let media = media_base(source.repr_type.media_type.as_str()).to_string();
+    if media.eq_ignore_ascii_case(PLAIN_JSON) {
+        if let Some(face) = rdf_face(inv, uri).await? {
+            return Ok(face);
+        }
+    }
     if let Some(format) = rdf_format(&media) {
         return Ok((format, source));
     }
