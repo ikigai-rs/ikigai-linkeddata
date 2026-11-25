@@ -49,6 +49,8 @@ http-client-probe = ["oxigraph/http-client"]
 rdf-12 = ["ikigai-rdf/rdf-12", "oxigraph/rdf-12"]
 
 [dev-dependencies]
+# Exercise the shared classifier against the same parsed query that Oxigraph evaluates.
+ikigai-rdf = { workspace = true, features = ["sparql-algebra"] }
 # block_on for driving kernel.issue in the shared-store tests.
 futures = "0.3"
 # The module recipe walks every bound endpoint, including BODIES and BODY-INPUTS.

@@ -21,12 +21,17 @@ oxrdf = { workspace = true }
 # ONE copy; when oxrdfio's floor moves, move this with oxrdfxml's quick-xml line.
 quick-xml = { version = "0.37", optional = true }
 oxttl = "0.2"
+# Share Oxigraph 0.5's spargebra 0.4 types. Enable both shape-changing features
+# so the walker remains exhaustive when a consumer unifies either one on.
+spargebra = { version = "0.4.7", optional = true, features = ["sep-0006", "sparql-12"] }
 # The streamed body of `urn:rdf:transrept` (ledger #2278); core already depends on it.
 futures-util = { version = "0.3", default-features = false, optional = true }
 
 [features]
 # Preserve the full endpoint API by default. Scan-only/Turtle consumers opt out.
 default = ["transrept"]
+# Parsed-query classification without an evaluator or endpoint.
+sparql-algebra = ["dep:spargebra", "rdf-12"]
 # oxrdfio 0.2 bundles every syntax; none is needed by the standalone depth scans.
 transrept = ["dep:oxrdfio", "dep:futures-util", "rdfxml"]
 # XML scanning can also be used without the full transreption parser graph.
