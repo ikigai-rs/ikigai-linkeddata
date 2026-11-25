@@ -104,11 +104,11 @@ struct FeedGraph;
 #[async_trait]
 impl Endpoint for FeedGraph {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let face = optional(inv, "as")?.unwrap_or("text/turtle");
+        let face = inv.optional_str("as")?.unwrap_or("text/turtle");
         if !FACES.contains(&face) {
             return Err(invalid("as", format!("unsupported RDF face: {face}")));
         }
-        let base = optional(inv, "base")?.filter(|b| !b.is_empty());
+        let base = inv.optional_str("base")?.filter(|b| !b.is_empty());
         if let Some(base) = base {
             NamedNode::new(base).map_err(|e| invalid("base", format!("not an IRI: {e}")))?;
         }
@@ -182,14 +182,6 @@ impl Endpoint for FeedGraph {
             .lossy()
             .fails(FailureClass::OverBudget);
         FACES.iter().fold(desc, |desc, face| desc.output(*face))
-    }
-}
-
-fn optional<'a>(inv: &'a Invocation<'_>, name: &str) -> Result<Option<&'a str>> {
-    match inv.inline_str(name) {
-        Ok(value) => Ok(Some(value)),
-        Err(Error::MissingArgument(_)) => Ok(None),
-        Err(error) => Err(error),
     }
 }
 

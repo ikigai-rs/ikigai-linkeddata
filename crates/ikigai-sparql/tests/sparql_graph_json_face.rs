@@ -28,7 +28,7 @@ const TURTLE: &str =
 /// it records the `as=` of every request it answers in `asked`.
 fn kernel(offers: &'static [&'static str], asked: Arc<Mutex<Vec<Option<String>>>>) -> Kernel {
     let source = FnEndpoint::new("annotations", move |inv: &Invocation<'_>| {
-        let as_type = inv.inline_str("as").ok().map(str::to_owned);
+        let as_type = inv.optional_str("as")?.map(str::to_owned);
         asked.lock().unwrap().push(as_type.clone());
         let rep = match as_type.as_deref() {
             Some(t) if offers.contains(&t) => {

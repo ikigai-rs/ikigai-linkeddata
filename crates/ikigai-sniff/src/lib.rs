@@ -419,7 +419,7 @@ impl Endpoint for AutoTransrept {
         // Core's typed refusal, unchanged: `MissingArgument` when absent (pipe a resource in,
         // or pass `content=…`).
         let body = inv.content_body("content").await?;
-        let to = inv.inline_str("as").unwrap_or(TURTLE);
+        let to = inv.optional_str("as")?.unwrap_or(TURTLE);
         let (from, body) = sniff_body(body).await?;
 
         // Already the requested type → pass through (re-typed from octet-stream to what it is).
@@ -676,7 +676,7 @@ mod tests {
     /// test can see it ran and that the right bytes flowed through.
     fn stub_turtle_to_html() -> FnEndpoint {
         FnEndpoint::new("ttl2html", |inv: &Invocation<'_>| {
-            let content = inv.inline_str("content").unwrap_or("");
+            let content = inv.optional_str("content")?.unwrap_or("");
             Ok(Representation::new(
                 ReprType::new("text/html"),
                 format!("<table>{content}</table>").into_bytes(),
@@ -701,6 +701,45 @@ mod tests {
             .with_arg("content", ArgRef::Inline(content.to_vec()))
             .with_arg("as", ArgRef::Inline(as_type.as_bytes().to_vec()));
         futures::executor::block_on(auto_kernel().issue(request, &Capability::root()))
+    }
+
+    #[test]
+    fn auto_rejects_non_utf8_as() {
+        let request = Request::new(Verb::Source, Iri::parse("urn:transrept:auto").unwrap())
+            .with_arg(
+                "content",
+                ArgRef::Inline(b"<urn:a> <urn:b> <urn:c> .".to_vec()),
+            )
+            .with_arg("as", ArgRef::Inline(vec![0xff]));
+        let result = futures::executor::block_on(auto_kernel().issue(request, &Capability::root()));
+        assert!(
+            matches!(result, Err(Error::InvalidArgument { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn auto_rejects_non_inline_as() {
+        use ikigai_core::{Bindings, ContentId};
+        let bindings = Bindings::new();
+        let capability = Capability::root();
+        for value in [
+            ArgRef::Reference(Iri::parse("urn:test:value").unwrap()),
+            ArgRef::Content(ContentId::of(b"value")),
+        ] {
+            let request = Request::new(Verb::Source, Iri::parse("urn:transrept:auto").unwrap())
+                .with_arg(
+                    "content",
+                    ArgRef::Inline(b"@prefix ex: <http://e/> . ex:a ex:b ex:c .".to_vec()),
+                )
+                .with_arg("as", value);
+            let inv = Invocation::detached(&request, &bindings, &capability);
+            let result = futures::executor::block_on(AutoTransrept.invoke_body(&inv));
+            assert!(
+                matches!(result, Err(Error::InvalidArgument { ref name, ref detail }) if name == "as" && !detail.is_empty()),
+                "{result:?}"
+            );
+        }
     }
 
     #[test]

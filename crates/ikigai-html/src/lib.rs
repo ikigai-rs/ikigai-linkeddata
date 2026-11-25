@@ -95,7 +95,7 @@ struct HtmlGraph;
 #[async_trait]
 impl Endpoint for HtmlGraph {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let face = optional(inv, "as")?.unwrap_or("text/turtle");
+        let face = inv.optional_str("as")?.unwrap_or("text/turtle");
         if !FACES.contains(&face) {
             return Err(invalid("as", format!("unsupported RDF face: {face}")));
         }
@@ -217,14 +217,6 @@ impl Endpoint for HtmlGraph {
             )
             .fails(FailureClass::OverBudget);
         FACES.iter().fold(desc, |desc, face| desc.output(*face))
-    }
-}
-
-fn optional<'a>(inv: &'a Invocation<'_>, name: &str) -> Result<Option<&'a str>> {
-    match inv.inline_str(name) {
-        Ok(value) => Ok(Some(value)),
-        Err(Error::MissingArgument(_)) => Ok(None),
-        Err(error) => Err(error),
     }
 }
 

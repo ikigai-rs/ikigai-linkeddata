@@ -161,7 +161,7 @@ impl Endpoint for DiffEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         // Typed refusals from core (`MissingArgument`/`InvalidArgument`), as in `with_graph`.
         let content = inv.inline_str("content")?;
-        let mode = inv.inline_str("mode").unwrap_or("added");
+        let mode = inv.optional_str("mode")?.unwrap_or("added");
         let mut labels = BlankNodeLabels::new();
         let ours = parse_graph(content, "urn:rdf:diff", "content", &mut labels)?;
         let theirs = with_graph(inv, "urn:rdf:diff", &mut labels).await?;
@@ -169,9 +169,10 @@ impl Endpoint for DiffEndpoint {
             "added" => (&ours, &theirs),
             "removed" => (&theirs, &ours),
             other => {
-                return Err(Error::Endpoint(format!(
-                    "urn:rdf:diff: mode must be added or removed, not `{other}`"
-                )))
+                return Err(Error::InvalidArgument {
+                    name: "mode".to_string(),
+                    detail: format!("must be added or removed, not `{other}`"),
+                })
             }
         };
         let mut delta = Graph::default();
@@ -243,7 +244,7 @@ struct TransreptEndpoint;
 #[async_trait::async_trait]
 impl Endpoint for TransreptEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let as_type = inv.inline_str("as").unwrap_or("text/turtle");
+        let as_type = inv.optional_str("as")?.unwrap_or("text/turtle");
         // A member of the `content`/`src` group is GIVEN when it is non-empty (`InputGroup`):
         // a Sink-style engine sends an empty `content` when there is no body.
         let given = |name: &str| given(inv, name);
@@ -288,7 +289,7 @@ impl Endpoint for TransreptEndpoint {
     ///
     /// [`invoke`]: Endpoint::invoke
     async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
-        let as_type = inv.inline_str("as").unwrap_or("text/turtle");
+        let as_type = inv.optional_str("as")?.unwrap_or("text/turtle");
         let (arg, body, from, base) = match inv.request.args.get("src") {
             Some(ArgRef::Inline(src)) if !src.is_empty() => {
                 if streams_to(as_type).is_none() {
@@ -747,12 +748,13 @@ fn convert(
         return Ok(("text/html".to_string(), html.into_bytes()));
     }
 
-    let to = format_for(as_type).ok_or_else(|| {
-        Error::Endpoint(format!(
-            "urn:rdf:transrept: unknown target `{as_type}` — try text/turtle, \
-             application/n-triples, application/n-quads, application/trig, \
-             application/rdf+xml, application/ld+json, or text/html"
-        ))
+    let to = format_for(as_type).ok_or_else(|| Error::InvalidArgument {
+        name: "as".to_string(),
+        detail: format!(
+            "unknown target `{as_type}` — try text/turtle, \
+                 application/n-triples, application/n-quads, application/trig, \
+                 application/rdf+xml, application/ld+json, or text/html"
+        ),
     })?;
 
     let mut out = Vec::new();
@@ -1030,6 +1032,49 @@ mod tests {
             &mut BlankNodeLabels::new(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn optional_arguments_reject_unreadable_values_in_both_conversion_paths() {
+        use ikigai_core::{Bindings, ContentId};
+        let bindings = Bindings::new();
+        let capability = Capability::root();
+        for (name, endpoint) in [
+            ("mode", &DiffEndpoint as &dyn Endpoint),
+            ("as", &TransreptEndpoint as &dyn Endpoint),
+        ] {
+            for value in [
+                ArgRef::Inline(vec![0xff]),
+                ArgRef::Reference(Iri::parse("urn:test:value").unwrap()),
+                ArgRef::Content(ContentId::of(b"value")),
+            ] {
+                let request = Request::new(Verb::Source, Iri::parse("urn:test:request").unwrap())
+                    .with_arg("content", ArgRef::Inline(GRAPH_A.as_bytes().to_vec()))
+                    .with_arg("with", ArgRef::Inline(GRAPH_B.as_bytes().to_vec()))
+                    .with_arg(name, value);
+                let inv = Invocation::detached(&request, &bindings, &capability);
+                let result = block_on(endpoint.invoke(&inv));
+                assert!(
+                    matches!(result, Err(Error::InvalidArgument { name: ref n, ref detail }) if n == name && !detail.is_empty()),
+                    "{name}: {result:?}"
+                );
+                if name == "as" {
+                    let result = block_on(endpoint.invoke_body(&inv));
+                    assert!(
+                        matches!(result, Err(Error::InvalidArgument { name: ref n, .. }) if n == name),
+                        "{result:?}"
+                    );
+                }
+            }
+        }
+        let request = Request::new(Verb::Source, Iri::parse("urn:test:request").unwrap())
+            .with_arg("content", ArgRef::Inline(GRAPH_A.as_bytes().to_vec()))
+            .with_arg("with", ArgRef::Inline(GRAPH_B.as_bytes().to_vec()))
+            .with_arg("mode", ArgRef::Inline(b"unknown".to_vec()));
+        let inv = Invocation::detached(&request, &bindings, &capability);
+        assert!(
+            matches!(block_on(DiffEndpoint.invoke(&inv)), Err(Error::InvalidArgument { name, .. }) if name == "mode")
+        );
     }
 
     #[test]
