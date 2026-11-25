@@ -25,10 +25,13 @@
 //! The default `transrept` feature provides `space()` and all formats. With
 //! `default-features = false`, Turtle/JSON depth scans, canonicalization and
 //! [`subclass_axioms`] remain available without oxrdfio. The `rdfxml` feature adds
-//! `check_rdfxml_nesting` and quick-xml independently of transreption.
+//! `check_rdfxml_nesting` and quick-xml independently of transreption. The optional
+//! `sparql-algebra` feature classifies parsed queries without an evaluator.
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "sparql-algebra")]
+pub mod algebra;
 mod canonical;
 mod depth;
 pub use canonical::{canonical_triples, BlankNodeLabels};
