@@ -1,6 +1,8 @@
 [package]
 name = "ikigai-rdf"
-version.workspace = true
+# 0.6.1 adds the opt-in `sparql-algebra` feature: `algebra::repeatability_reasons`, the parsed-SPARQL
+# repeatability classifier (ledger #4417). Additive, so a patch on its own version line.
+version = "0.6.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
