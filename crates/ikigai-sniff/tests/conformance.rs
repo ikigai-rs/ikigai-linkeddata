@@ -28,7 +28,7 @@
 //!
 //! - `urn:http:get` serves the *origin's* `Content-Type`. There is no face it picks
 //!   for itself, so no declaration can be true and the waiver is the only honest move.
-//! - `urn:transrept:auto` picks one: `inline_str("as").unwrap_or(TURTLE)`, matching
+//! - `urn:transrept:auto` picks one: `optional_str("as")?.unwrap_or(TURTLE)`, matching
 //!   the `as` ArgSpec's `default_value`. The walk's minimal call supplies no `as`
 //!   (it is optional), so what OUTPUTS observes **is** that own choice, and
 //!   `.output("text/turtle")` is true rather than fixture-shaped. It was verified by

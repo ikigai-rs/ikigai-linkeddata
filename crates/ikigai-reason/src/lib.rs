@@ -108,16 +108,16 @@ struct ReasonEndpoint {
 impl Endpoint for ReasonEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let graph = inv.inline_str("graph")?;
-        let profile = optional(inv, "profile")?.unwrap_or("owl-rl");
+        let profile = inv.optional_str("profile")?.unwrap_or("owl-rl");
         if profile != "owl-rl" {
             return Err(invalid("profile", "expected owl-rl"));
         }
-        let omit_thing = match optional(inv, "omit-thing")?.unwrap_or("false") {
+        let omit_thing = match inv.optional_str("omit-thing")?.unwrap_or("false") {
             "true" => true,
             "false" => false,
             _ => return Err(invalid("omit-thing", "expected true or false")),
         };
-        let face = optional(inv, "as")?.unwrap_or("text/turtle");
+        let face = inv.optional_str("as")?.unwrap_or("text/turtle");
         if !FACES.contains(&face) {
             return Err(invalid("as", format!("unsupported RDF face: {face}")));
         }
@@ -216,14 +216,6 @@ impl Endpoint for ReasonEndpoint {
                 .one_of(FACES).default_value("text/turtle"))
             .fails(FailureClass::OverBudget);
         FACES.iter().fold(desc, |desc, face| desc.output(*face))
-    }
-}
-
-fn optional<'a>(inv: &'a Invocation<'_>, name: &str) -> Result<Option<&'a str>> {
-    match inv.inline_str(name) {
-        Ok(value) => Ok(Some(value)),
-        Err(Error::MissingArgument(_)) => Ok(None),
-        Err(error) => Err(error),
     }
 }
 

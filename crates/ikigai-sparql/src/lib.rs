@@ -560,7 +560,7 @@ impl Endpoint for SparqlEndpoint {
             budget::inline_bound(inv, "max_bytes")?,
             self.answer,
         )?;
-        let as_type = inv.inline_str("as").ok();
+        let as_type = inv.optional_str("as")?;
         // Read before any `graph=` source is resolved, so a malformed one costs no resolution.
         let bound = bindings::from_request(inv)?;
 
@@ -568,7 +568,10 @@ impl Endpoint for SparqlEndpoint {
         // Uncacheable — raw-handle writes carry no golden thread, so a cached result
         // could never be invalidated (Expiry::Always is Representation's default).
         if let Some(store) = &self.shared {
-            if inv.inline_str("graph").is_ok_and(|g| !g.trim().is_empty()) {
+            if inv
+                .optional_str("graph")?
+                .is_some_and(|g| !g.trim().is_empty())
+            {
                 return Err(Error::Endpoint(
                     "`graph=` is not supported over a shared store: loading sources would \
                      mutate the caller-owned store. Write through its handle instead, or \
@@ -583,7 +586,7 @@ impl Endpoint for SparqlEndpoint {
 
         // `graph=` is optional: the vocabulary graph (below) is always present, so a query
         // can run against it alone. Listed sources federate on top of it.
-        let graph_list = inv.inline_str("graph").unwrap_or("");
+        let graph_list = inv.optional_str("graph")?.unwrap_or("");
 
         // Build the dataset, pre-seeded with the bundled ikigai vocabulary (see
         // `store_with_vocabulary`). Each listed source is resolved through the kernel and
@@ -791,7 +794,10 @@ impl Endpoint for SparqlUpdateEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         // Refuse `graph=` loudly rather than ignoring it: a caller passing it has a
         // per-query federation model in mind, and this endpoint has none to offer.
-        if inv.inline_str("graph").is_ok_and(|g| !g.trim().is_empty()) {
+        if inv
+            .optional_str("graph")?
+            .is_some_and(|g| !g.trim().is_empty())
+        {
             return Err(Error::Endpoint(
                 "`graph=` is not supported by SPARQL UPDATE: an update writes to the \
                  caller-owned shared store, and a per-query dataset would be discarded when \
@@ -804,22 +810,18 @@ impl Endpoint for SparqlUpdateEndpoint {
         // `update=` is the SPARQL 1.1 Protocol's name for update text (the siblings' arg
         // is `query=`, and this is not a query); piped `content` is the pipeline form,
         // which is also what the bare `sink urn:sparql:update <text>` REPL shape produces.
-        let update_str = inv
-            .inline_str("update")
-            .or_else(|_| inv.inline_str("content"))
-            .map_err(|_| {
-                Error::MissingArgument(
-                    "update (the SPARQL UPDATE text, or pipe it in as content)".to_string(),
-                )
-            })?;
-
-        // The text arrives as `update` or `content`; the refusal names the one the caller
-        // used, so it can be acted on (ledger #962).
-        let arg = if inv.inline_str("update").is_ok() {
-            "update"
-        } else {
-            "content"
+        let (update_str, arg) = match inv.optional_str("update")? {
+            Some(update) => (update, "update"),
+            None => (
+                inv.optional_str("content")?.ok_or_else(|| {
+                    Error::MissingArgument(
+                        "update (the SPARQL UPDATE text, or pipe it in as content)".to_string(),
+                    )
+                })?,
+                "content",
+            ),
         };
+
         limits::check_sparql(update_str, arg)?;
         bindings::refuse(inv, inv.request.target.as_str())?;
         let budget = budget::effective_budget(budget::inline_bound(inv, "budget")?, self.ceiling)?;
@@ -1455,13 +1457,14 @@ fn results_format_or_default(as_type: Option<&str>) -> Result<QueryResultsFormat
     let Some(spec) = as_type else {
         return Ok(QueryResultsFormat::Json);
     };
-    results_format(Some(spec)).ok_or_else(|| {
-        Error::Endpoint(format!(
+    results_format(Some(spec)).ok_or_else(|| Error::InvalidArgument {
+        name: "as".to_string(),
+        detail: format!(
             "SPARQL SELECT/ASK: unknown target `{spec}` — try \
              application/sparql-results+json, application/sparql-results+xml, text/csv, \
              or text/tab-separated-values (short aliases json, xml, csv, tsv are accepted). \
              A graph syntax is not one of them: only CONSTRUCT and DESCRIBE answer with a graph"
-        ))
+        ),
     })
 }
 
@@ -1471,14 +1474,15 @@ fn graph_format_or_default(as_type: Option<&str>) -> Result<RdfFormat> {
     let Some(spec) = as_type else {
         return Ok(RdfFormat::Turtle);
     };
-    rdf_format(spec).ok_or_else(|| {
-        Error::Endpoint(format!(
+    rdf_format(spec).ok_or_else(|| Error::InvalidArgument {
+        name: "as".to_string(),
+        detail: format!(
             "SPARQL CONSTRUCT/DESCRIBE: unknown target `{spec}` — try text/turtle, \
              application/n-triples, application/n-quads, application/trig, \
              application/rdf+xml, or application/ld+json (short aliases ttl, nt, nq, trig, \
              rdfxml, jsonld are accepted). A results syntax is not one of them: only SELECT \
              and ASK answer with a result set"
-        ))
+        ),
     })
 }
 
@@ -1641,6 +1645,71 @@ fn is_xml_qname(token: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_query_and_update_arguments_reject_unreadable_values() {
+        use futures::executor::block_on;
+        use ikigai_core::{Bindings, Capability, ContentId};
+        let bindings = Bindings::new();
+        let capability = Capability::root();
+        let store = Arc::new(Store::new().unwrap());
+        for shared in [None, Some(Arc::clone(&store))] {
+            let endpoint = SparqlEndpoint {
+                verb: "select",
+                id: "test".into(),
+                shared,
+                ceiling: Duration::from_secs(5),
+                answer: budget::AnswerBound::DEFAULT,
+            };
+            for name in ["as", "graph"] {
+                for value in [
+                    ArgRef::Inline(vec![0xff]),
+                    ArgRef::Reference(Iri::parse("urn:test:value").unwrap()),
+                    ArgRef::Content(ContentId::of(b"value")),
+                ] {
+                    let request = Request::new(Verb::Source, Iri::parse("urn:test:query").unwrap())
+                        .with_arg("query", ArgRef::Inline(b"SELECT * WHERE {}".to_vec()))
+                        .with_arg(name, value);
+                    let inv = Invocation::detached(&request, &bindings, &capability);
+                    let result = block_on(endpoint.invoke(&inv));
+                    assert!(
+                        matches!(result, Err(Error::InvalidArgument { name: ref n, ref detail }) if n == name && !detail.is_empty()),
+                        "{name}: {result:?}"
+                    );
+                }
+            }
+        }
+        let endpoint = SparqlUpdateEndpoint {
+            id: "test".into(),
+            store,
+            ceiling: Duration::from_secs(5),
+        };
+        for name in ["graph", "update", "content"] {
+            for value in [
+                ArgRef::Inline(vec![0xff]),
+                ArgRef::Reference(Iri::parse("urn:test:value").unwrap()),
+                ArgRef::Content(ContentId::of(b"value")),
+            ] {
+                let mut request =
+                    Request::new(Verb::Source, Iri::parse("urn:test:update").unwrap());
+                if name == "graph" {
+                    request =
+                        request.with_arg("update", ArgRef::Inline(b"INSERT DATA {}".to_vec()));
+                }
+                if name == "update" {
+                    request =
+                        request.with_arg("content", ArgRef::Inline(b"INSERT DATA {}".to_vec()));
+                }
+                request = request.with_arg(name, value);
+                let inv = Invocation::detached(&request, &bindings, &capability);
+                let result = block_on(endpoint.invoke(&inv));
+                assert!(
+                    matches!(result, Err(Error::InvalidArgument { name: ref n, ref detail }) if n == name && !detail.is_empty()),
+                    "{name}: {result:?}"
+                );
+            }
+        }
+    }
 
     const A: &str = r#"@prefix ex: <http://ex/> . ex:a ex:name "Ada" ; ex:knows ex:b ."#;
     const B: &str = r#"@prefix ex: <http://ex/> . ex:b ex:name "Bob" ."#;
