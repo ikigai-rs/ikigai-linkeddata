@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-sparql"
-version = "0.6.1"
+version = "0.7.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -50,14 +50,14 @@ rdf-12 = ["ikigai-rdf/rdf-12", "oxigraph/rdf-12"]
 
 [dev-dependencies]
 # Exercise the shared classifier against the same parsed query that Oxigraph evaluates.
-# 0.6.1 is the first ikigai-rdf with `sparql-algebra`, so a published copy of this crate names a
+# 0.7.0 is the first ikigai-rdf on core 0.5 with `sparql-algebra`, so this crate names a
 # dev-dependency that has the feature.
-ikigai-rdf = { path = "../ikigai-rdf", version = "0.6.1", features = ["sparql-algebra"] }
+ikigai-rdf = { path = "../ikigai-rdf", version = "0.7.0", features = ["sparql-algebra"] }
 # block_on for driving kernel.issue in the shared-store tests.
 futures = "0.3"
 # The module recipe walks every bound endpoint, including BODIES and BODY-INPUTS.
-# 0.15.0 is conformance on ikigai-core 0.4 (the core 0.4.0 cascade).
-ikigai-conformance = "0.15.0"
+# 0.16.0 is the first conformance release on ikigai-core 0.5.
+ikigai-conformance = "0.16.0"
 
 # Oxigraph's `js` feature wires getrandom's wasm backend (paired with the
 # getrandom_backend cfg in .cargo/config.toml), so the store/query run in the browser.

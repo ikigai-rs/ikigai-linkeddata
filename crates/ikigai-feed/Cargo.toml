@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-feed"
-version = "0.6.1"
+version = "0.7.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -16,7 +16,8 @@ oxrdfio.workspace = true
 async-trait = "0.1"
 # The vetted parser (ledger #2624): Atom, RSS 0.9x/1.0/2.0 into one model, both date formats.
 # No default features exist; `sanitize` (ammonia) stays off — the lift carries text as written.
-feed-rs = "3.0.0"
+# 3.1 changes date types; this lift uses the 3.0 chrono model.
+feed-rs = "=3.0.0"
 # The bounding pre-scan runs feed-rs's own XML reader line, so the two resolve to ONE copy.
 # When feed-rs moves its quick-xml line, move this with it.
 quick-xml = { version = "0.42", features = ["encoding"] }
@@ -27,12 +28,12 @@ sha2 = "0.10"
 
 [dev-dependencies]
 futures = "0.3"
-# 0.15.0 is conformance on ikigai-core 0.4 (the core 0.4.0 cascade).
-ikigai-conformance = "0.15.0"
+# 0.16.0 is the first conformance release on ikigai-core 0.5.
+ikigai-conformance = "0.16.0"
 # tests/mapped.rs mounts a config-home root as a host does: mappings are files it serves.
-# 0.6.0 is ikigai-fs on ikigai-core 0.4 (the core 0.4.0 cascade); older lines link the old core
+# 0.7.0 is the first ikigai-fs release on ikigai-core 0.5; older lines link the old core
 # beside this one.
-ikigai-fs = "0.6.0"
+ikigai-fs = "0.7.0"
 # tests/quote.rs maps a quote post through the HTML lift a host mounts beside this crate.
 ikigai-html = { path = "../ikigai-html" }
 # tests/river.rs runs the Book's river query over the form. `rdf-12` because sibling test

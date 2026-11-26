@@ -2,7 +2,7 @@
 name = "ikigai-rdf"
 # 0.6.1 adds the opt-in `sparql-algebra` feature: `algebra::repeatability_reasons`, the parsed-SPARQL
 # repeatability classifier (ledger #4417). Additive, so a patch on its own version line.
-version = "0.6.1"
+version = "0.7.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -64,5 +64,5 @@ oxrdfio = { workspace = true, features = ["rdf-12"] }
 # Path-only: a dev-dependency without a version is dropped from the published manifest.
 ikigai-sniff = { path = "../ikigai-sniff" }
 # The module recipe walks every bound endpoint, including BODIES and BODY-INPUTS.
-# 0.15.0 is conformance on ikigai-core 0.4 (the core 0.4.0 cascade).
-ikigai-conformance = "0.15.0"
+# 0.16.0 is the first conformance release on ikigai-core 0.5.
+ikigai-conformance = "0.16.0"
