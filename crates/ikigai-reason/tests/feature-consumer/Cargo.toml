@@ -7,13 +7,13 @@ publish = false
 [workspace]
 
 [dependencies]
-ikigai-reason = { path = "../.." }
+ikigai-reason = { path = "../..", version = "0.7.0" }
 # Also check that a default-feature SPARQL sibling compiles beside the reasoner.
-ikigai-sparql = { path = "../../../ikigai-sparql" }
+ikigai-sparql = { path = "../../../ikigai-sparql", version = "0.7.0" }
 # A sibling enables RDF 1.2 without enabling ikigai-reason/rdf-12.
-ikigai-rdf = { path = "../../../ikigai-rdf", features = ["rdf-12"] }
+ikigai-rdf = { path = "../../../ikigai-rdf", version = "0.7.0", features = ["rdf-12"] }
 
 [dev-dependencies]
-# core 0.4.0 (scope opacity, structured denials; the cascade).
-ikigai-core = "0.4.0"
+# Core 0.5.1 matches the reasoner public API.
+ikigai-core = "0.5.1"
 futures = "0.3"

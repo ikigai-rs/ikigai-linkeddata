@@ -10,7 +10,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-ikigai-rdf = { path = "../..", default-features = false }
+ikigai-rdf = { path = "../..", version = "0.7.0", default-features = false }
 
 [features]
 full = ["ikigai-rdf/transrept"]
