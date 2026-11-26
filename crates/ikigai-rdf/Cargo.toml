@@ -16,7 +16,7 @@ categories = ["web-programming", "parser-implementations"]
 async-trait = "0.1"
 ikigai-core = { workspace = true }
 oxrdfio = { workspace = true, optional = true }
-oxrdf = { workspace = true }
+oxrdf = { workspace = true, features = ["rdfc-10"] }
 # The XML reader oxrdfxml parses with, run over caller RDF/XML first to bound triple-term depth
 # (ledger #992, `src/depth.rs`): the scan IS the parser's lexer rather than a hand mirror of it.
 # "0.37" because oxrdfxml 0.2.4 (oxrdfio 0.2.6) asks for exactly that line, so the two resolve to
@@ -55,6 +55,7 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 futures = "0.3"
+serde_json = "1"
 # RDF 1.2 ON in the tests, as it is in ikigai-cli: rudof enables `oxrdfio/rdf-12` there, and
 # feature unification turns it on for this crate too. Without it `<<(` is a syntax error and the
 # triple-term depth tests (`tests/triple_term_depth.rs`, ledger #992) would test nothing.

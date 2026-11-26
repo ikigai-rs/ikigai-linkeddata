@@ -17,7 +17,8 @@ ikigai-core = "0.4.3"
 ikigai-vocab = "0.4.0"
 # Oxigraph's pure-Rust RDF crates — no rocksdb, so they compile to wasm32 (the
 # browser transrepts/queries client-side). The full store is in-memory only.
-oxrdf = "0.3"
+# RDFC-1.0 requires 0.3.2; the 0.3 caret permits only versions below 0.4.
+oxrdf = "0.3.2"
 oxrdfio = "0.2"
 oxigraph = { version = "0.5", default-features = false }
 # ikigai-sparql scans each `graph=` source with ikigai-rdf's depth scans before loading it
