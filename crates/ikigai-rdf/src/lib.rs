@@ -34,10 +34,12 @@
 pub mod algebra;
 mod canonical;
 mod depth;
+mod rdfc;
 pub use canonical::{canonical_triples, BlankNodeLabels};
 pub use depth::{
     check_json_nesting, check_turtle_nesting, JSON_LD_STACK, MAX_JSON_NESTING, MAX_TURTLE_NESTING,
 };
+pub use rdfc::canonicalize_dataset;
 
 #[cfg(feature = "rdfxml")]
 pub use depth::check_rdfxml_nesting;

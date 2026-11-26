@@ -1,5 +1,6 @@
 //! Deterministic RDF output: the same graph serializes to the same bytes on every run
-//! (ledger #1566).
+//! (ledger #1566). This deterministic order is not RDFC-1.0 and must not be
+//! represented as RDFC-1.0 canonicalization.
 //!
 //! A `.cacheable()` answer promises that recomputing it gives the same bytes, and two things in
 //! the oxigraph stack break that promise for RDF without anyone asking them to:
