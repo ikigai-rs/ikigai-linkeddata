@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-feed"
-version = "0.6.1"
+version = "0.6.2"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -16,7 +16,8 @@ oxrdfio.workspace = true
 async-trait = "0.1"
 # The vetted parser (ledger #2624): Atom, RSS 0.9x/1.0/2.0 into one model, both date formats.
 # No default features exist; `sanitize` (ammonia) stays off — the lift carries text as written.
-feed-rs = "3.0.0"
+# 3.1 changes date types; this lift uses the 3.0 chrono model.
+feed-rs = "=3.0.0"
 # The bounding pre-scan runs feed-rs's own XML reader line, so the two resolve to ONE copy.
 # When feed-rs moves its quick-xml line, move this with it.
 quick-xml = { version = "0.42", features = ["encoding"] }
